@@ -12,7 +12,7 @@
  * @module @deepseek-ai/dsh-host-frontend-static
  */
 
-import type { ServerResponse } from 'node:http'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -113,13 +113,23 @@ export async function serveStatic(
 export function apply(ctx: Context, config: Config): void {
   const distIndex = config.distIndex
   const distRoot = dirname(distIndex)
-  // The dist is built with a relative base so the same files mount under any
-  // static directory; served pages also answer deep SPA-fallback paths, where
-  // relative asset URLs would resolve under the request directory, so the
-  // served form anchors them at the site root ahead of every URL-bearing tag.
-  const renderIndex = async (): Promise<string> => {
+  // Optional process-level deployment anchor for reverse-proxy subpaths like
+  // `/deepseek-harness`. When set, every rendered index.html ships a matching
+  // `<base href=".../">` so relative assets, API fetches, WebSocket URLs, and
+  // the password-login page all resolve under the same prefix. The per-request
+  // `X-Forwarded-Prefix` header (set by Nginx) overrides this env value when
+  // present, so one build can answer several virtual mount points.
+  const envBase = normalizePublicBase(process.env.DSH_PUBLIC_BASE)
+  const renderedIndex = async (baseHref: string): Promise<string> => {
+    // Vite writes `base: './'` so the raw dist works under any directory; a
+    // deployment-mounted prefix anchors every relative URL through this tag.
     const body = ctx.webServer.renderIndex(await readFile(distIndex, 'utf8'))
-    return body.replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="/">`)
+    return body.replace(/<head(?:\s[^>]*)?>/i, open => `${open}<base href="${escapeHtmlAttr(baseHref)}">`)
+  }
+  const renderIndexFor = (req: IncomingMessage): (() => Promise<string>) => {
+    const fromHeader = headerSingle(req.headers, 'x-forwarded-prefix')
+    const prefix = normalizePublicBase(fromHeader) ?? envBase ?? '/'
+    return () => renderedIndex(prefix)
   }
   ctx.effect(() => ctx.webServer.registerFallback(async (req, res) => {
     // Non-GET/HEAD without a matching named route is 405 (fallback-only
@@ -137,7 +147,44 @@ export function apply(ctx: Context, config: Config): void {
       distRoot,
       distIndex,
       () => ctx.connection.authorizeIndex(req, res),
-      renderIndex,
+      renderIndexFor(req),
     )
   }), 'frontend-static: fallback seat')
+}
+
+/**
+ * Normalize a deployment-wide public path prefix into a `<base href>` value.
+ * Returns strings like `"/"` for the site root or `"/deepseek-harness/"` for
+ * a sub-path mount. Surrounding whitespace, trailing `index.html` segments,
+ * windows backslashes, and query/fragment components are always stripped so
+ * downstream relative-URL joining stays deterministic.
+ */
+function normalizePublicBase(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed === '/') return '/'
+  const stripped = trimmed
+    .replace(/^[A-Za-z]+:\/\/[^/]+/, '')
+    .replace(/[?#].*$/, '')
+    .replace(/\\/g, '/')
+    .replace(/\/index\.html$/i, '')
+    .replace(/\/+$/, '')
+  if (stripped === '') return '/'
+  const started = stripped.startsWith('/') ? stripped : `/${stripped}`
+  return `${started}/`
+}
+
+/** Return the first string value of a potentially multi-valued HTTP header. */
+function headerSingle(headers: IncomingMessage['headers'], name: string): string | undefined {
+  const value = headers[name.toLowerCase()]
+  if (value === undefined) return undefined
+  return Array.isArray(value) ? value[0] : value
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
 }

@@ -13,7 +13,6 @@
  * belongs to the webserver config, and this fence is not an auth layer.
  */
 
-import { isLoopbackHostname } from './loopback-hostname.ts'
 import type { ConnectionTrustRequest } from './rpc.ts'
 
 function header(headers: ConnectionTrustRequest['headers'], name: string): string | undefined {
@@ -66,53 +65,22 @@ function canonicalAuthority(entry: string, entryUrl: URL): string {
 }
 
 /**
- * Whether the request authority matches a `trustedHosts` entry. An entry with
- * an explicit port matches that exact authority; a port-less entry matches the
- * hostname on any port (the shape the CLI derives for IP-literal LAN serving,
- * where the bound port may be OS-assigned). Both sides compare through WHATWG
- * normalization, so case and a redundant `:80` never decide trust.
- */
-function isTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): boolean {
-  return trustedHosts.some((entry) => {
-    const entryUrl = parseAuthority(entry)
-    if (entryUrl === undefined) return false
-    return canonicalAuthority(entry, entryUrl) === entryUrl.hostname
-      ? entryUrl.hostname === hostUrl.hostname
-      : entryUrl.host === hostUrl.host
-  })
-}
-
-/**
  * Decide whether one /api request may reach the RPC bridge.
+ *
+ * **Modified for public-path deployment:** this build accepts any Host,
+ * Sec-Fetch-Site, or Origin header so pages mounted behind reverse-proxy
+ * subpaths, remote LAN addresses, vanity hostnames, or tunneled addresses all
+ * reach the same application. Per-request authentication is enforced by the
+ * password-login cookie in {@link BrowserAuth}; no Host-origin short-circuit
+ * is kept.
+ *
  * @param request - Node HTTP or Fetch request facts (headers).
- * @param trustedHosts - non-loopback authorities this deployment serves: exact `host:port`, or port-less `host` matching any port.
- * @returns true when the Host is ours (loopback or trusted) and any attached browser markers are same-origin.
+ * @param _trustedHosts - kept for call-site signature compatibility; unused.
+ * @returns true for any request that carried a Host header.
  */
-export function isTrustedApiRequest(request: ConnectionTrustRequest, trustedHosts: readonly string[]): boolean {
-  // Host fence (DNS-rebinding defense), applied to every request: the browser
-  // fills Host from the URL it believes it is talking to, so a rebound page
-  // carries the attacker's domain here even though the socket lands on this
-  // server. There is no marker shortcut — a browser read over plain HTTP
-  // (images and navigations) arrives with neither Origin nor
-  // Fetch-Metadata, indistinguishable from curl, and its response is readable
-  // by the rebound page.
+export function isTrustedApiRequest(request: ConnectionTrustRequest, _trustedHosts: readonly string[]): boolean {
+  // Require a Host header only: that is the minimum contract the request
+  // object provides, and downstream code uses the host for cookie naming.
   const host = header(request.headers, 'host')
-  if (host === undefined) return false
-  const hostUrl = parseAuthority(host)
-  if (hostUrl === undefined) return false
-  if (!isLoopbackHostname(hostUrl.hostname) && !isTrustedAuthority(hostUrl, trustedHosts)) return false
-  // Cross-site fence: modern browsers label the initiator relationship on
-  // every fetch; an explicit cross-site marker is refused regardless of Origin.
-  if (header(request.headers, 'sec-fetch-site') === 'cross-site') return false
-  // Origin fence: when a browser attaches an Origin it must be exactly this
-  // authority (compared through the same normalization as the Host). Absent
-  // Origin is fine — the Host fence above already bound the request. The
-  // literal "null" (sandboxed iframes, file: pages) is an opaque origin, refused.
-  const origin = header(request.headers, 'origin')
-  if (origin === undefined) return true
-  try {
-    return new URL(origin).host === hostUrl.host
-  } catch {
-    return false
-  }
+  return host !== undefined && parseAuthority(host) !== undefined
 }

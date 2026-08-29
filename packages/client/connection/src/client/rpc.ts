@@ -106,6 +106,12 @@ function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 }
 
 function resolveBase(): string {
+  // Use document.baseURI (anchored by the <base href="..."> tag the Host
+  // injects into index.html) so RPC requests correctly resolve behind a
+  // reverse-proxy sub-path mount such as /deepseek-harness/. A worker or
+  // offline harness falls back to the page origin, then the sentinel value.
+  const doc = (globalThis as { document?: { baseURI?: string } }).document
+  if (doc?.baseURI !== undefined && doc.baseURI !== '') return doc.baseURI
   const location = (globalThis as { location?: { origin?: string } }).location
   return location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE
 }

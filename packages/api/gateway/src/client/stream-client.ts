@@ -340,8 +340,19 @@ class StreamInbox {
 }
 
 function remoteStreamUrl(): string {
+  // Resolve the multiplexed WebSocket URL against the Host-injected
+  // `<base href="...">` when available (document.baseURI) so a reverse-proxy
+  // sub-path mount like `/deepseek-harness` becomes part of the path. The
+  // server route still strips the prefix before the upgrade handler, but the
+  // originating client needs the full public path to reach the proxy mount.
+  const doc = (globalThis as { document?: { baseURI?: string } }).document
+  const fromBase = doc?.baseURI !== undefined && doc.baseURI !== '' ? doc.baseURI : undefined
   const location = (globalThis as { location?: { origin?: string } }).location
-  const base = location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE
+  const base = fromBase ?? (
+    location?.origin !== undefined && location.origin !== 'null'
+      ? location.origin
+      : INTERNAL_BASE
+  )
   const url = new URL(REMOTE_STREAM_MUX_PATH, base)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.href

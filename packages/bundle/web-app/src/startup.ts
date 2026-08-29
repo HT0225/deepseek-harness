@@ -71,9 +71,11 @@ export function apply(ctx: Context): void {
   const program = webCommand()
   program.action(() => {
     const options = program.opts<WebOptions>()
-    if (options.host === '0.0.0.0') {
-      program.error('error: --host 0.0.0.0 is intentionally not supported yet for safety: it would expose remote code execution to the network; use 127.0.0.1 instead')
-    }
+    // **Modified for public-path deployment:** allow both 127.0.0.1 and
+    // 0.0.0.0 binds. Password-based auth + cookie session protect the UI so
+    // network-wide exposure is safe for a single-operator installation. The
+    // historical `0.0.0.0` refusal was tied to the launch-token model; this
+    // build replaces that model with browser-auth login pages.
     if (options.port !== undefined && !/^\d+$/.test(options.port)) {
       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
     }

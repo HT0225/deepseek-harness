@@ -1,8 +1,21 @@
-/** Browser-session authentication for the Host Connection carrier. */
+/** Browser-session authentication for the Host Connection carrier.
+ *
+ * **Modified for public-path deployment:** replaces the one-shot process
+ * launch-token flow with a persistent password-login page. A single password
+ * is stored (bcrypt hash) in a dedicated SQLite table under the user's DSH
+ * home, and every page request is gated on a signed HttpOnly cookie. The
+ * `/login.json` POST endpoint performs password verification; a login page
+ * is served for any unauthenticated HTML visit so end-users never see the
+ * token-based 401. Passwords are never stored or transmitted in plaintext in
+ * the database. */
 
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual, scryptSync } from 'node:crypto'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { mkdir } from 'node:fs/promises'
+import { dirname, join as joinPath } from 'node:path'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
+import { DatabaseSync } from 'node:sqlite'
 import type {
   ConnectionIndexRequest,
   ConnectionIndexResponse,
@@ -12,12 +25,18 @@ import type {
 const AUTH_RECORD_KEY = credentialKey('client-connection', 'browser-session')
 const DAY_MILLISECONDS = 24 * 60 * 60 * 1000
 const SECRET_BYTES = 32
-const TOKEN_QUERY = 'token'
 const COOKIE_PREFIX = 'dsh-auth-'
 const COOKIE_PAYLOAD_VERSION = 1
 const STORED_SECRET_VERSION = 1
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]*$/
-const PROCESS_LAUNCH_TOKENS = new WeakMap<object, string>()
+const SESSION_DAYS_DEFAULT = 7
+/** Initial password environment variable. Only consulted when the login table
+ * has no rows yet, enabling bootstrapping without a console-only password.
+ * After the first password has been stored this variable is ignored, which
+ * lets operators rotate the value inside the GUI. */
+const DSH_WEB_PASSWORD = 'DSH_WEB_PASSWORD' as const
+const DSH_WEB_PASSWORD_TABLE = 'web_login_password' as const
+const DSH_WEB_SCHEMA_VERSION = 1 as const
 
 interface StoredSecretPayload {
   readonly version: typeof STORED_SECRET_VERSION
@@ -47,14 +66,6 @@ function decodeBase64Url(value: string): Buffer | undefined {
   const padding = '='.repeat((4 - value.length % 4) % 4)
   const decoded = Buffer.from(value.replaceAll('-', '+').replaceAll('_', '/') + padding, 'base64')
   return encodeBase64Url(decoded) === value ? decoded : undefined
-}
-
-function processLaunchToken(owner: object): string {
-  const existing = PROCESS_LAUNCH_TOKENS.get(owner)
-  if (existing !== undefined) return existing
-  const created = encodeBase64Url(randomBytes(SECRET_BYTES))
-  PROCESS_LAUNCH_TOKENS.set(owner, created)
-  return created
 }
 
 function header(
@@ -97,12 +108,6 @@ function storedSecret(record: CredentialRecord | undefined): Buffer | undefined 
   return secret
 }
 
-function tokenMatches(actual: string, expected: string): boolean {
-  const actualBytes = Buffer.from(actual, 'utf8')
-  const expectedBytes = Buffer.from(expected, 'utf8')
-  return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
-}
-
 function cookieName(authority: string): string {
   return COOKIE_PREFIX + encodeBase64Url(createHash('sha256').update(authority).digest())
 }
@@ -119,7 +124,7 @@ function cookieValue(headerValue: string, name: string): string | undefined {
 
 /** Serialize the fixed browser-session attributes; generated names and values are cookie-safe base64url. */
 function sessionCookie(name: string, value: string, expiresAt: number, maxAgeSeconds: number): string {
-  return `${name}=${value}; Max-Age=${String(maxAgeSeconds)}; Path=/; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Strict`
+  return `${name}=${value}; Max-Age=${String(maxAgeSeconds)}; Path=/; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Lax`
 }
 
 function signature(secret: Buffer, body: string): Buffer {
@@ -177,113 +182,262 @@ async function initializeSecret(credentials: CredentialProvider): Promise<Buffer
   return secret
 }
 
+/** Minimal pure-Node bcrypt hash/verify for the single-password login table.
+ * Uses node:sqlite's bundled `sqlite3` is not possible without a native dep,
+ * so we wrap scrypt as a pbkdf2-style verifier with a fixed work factor.
+ * Identifiers carry a `$dsh1$` tag so the field can upgrade later. */
+
+const PASSWORD_TAG = 'dsh1' as const
+const SCRYPT_N = 1 << 14 // 16384
+const SCRYPT_R = 8
+const SCRYPT_P = 1
+const SCRYPT_KEYLEN = 32
+const SALT_BYTES = 16
+
+function hashPassword(password: string): string {
+  const salt = randomBytes(SALT_BYTES)
+  const derived = scryptSync(password, salt, SCRYPT_KEYLEN, {
+    N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: 32 * 1024 * 1024,
+  })
+  return `$${PASSWORD_TAG}$${String(SCRYPT_N)}$${encodeBase64Url(salt)}$${encodeBase64Url(derived)}`
+}
+
+function verifyPassword(password: string, encoded: string): boolean {
+  const parts = encoded.split('$')
+  if (parts.length !== 5) return false
+  const [, tag, nStr, saltB64, hashB64] = parts
+  if (tag !== PASSWORD_TAG) return false
+  const n = Number(nStr)
+  if (!Number.isFinite(n) || n < 1024 || (n & (n - 1)) !== 0) return false
+  const salt = decodeBase64Url(saltB64 as string)
+  const expected = decodeBase64Url(hashB64 as string)
+  if (salt === undefined || expected === undefined || expected.byteLength !== SCRYPT_KEYLEN) return false
+  let derived: Buffer
+  try {
+    derived = scryptSync(password, salt, SCRYPT_KEYLEN, {
+      N: n, r: SCRYPT_R, p: SCRYPT_P, maxmem: 32 * 1024 * 1024,
+    })
+  } catch {
+    return false
+  }
+  return derived.byteLength === expected.byteLength && timingSafeEqual(derived, expected)
+}
+
+/** Open (or create) the dedicated login SQLite database and ensure schema.
+ * Uses only node:sqlite primitives directly so we do not pull the
+ * @deepseek-ai/dsh-storage-sqlite build artifact dependency. */
+async function openLoginDb(homePath: string): Promise<DatabaseSync> {
+  const dbPath = joinPath(homePath, 'web-auth.sqlite')
+  if (dbPath !== ':memory:') await mkdir(dirname(dbPath), { recursive: true, mode: 0o700 })
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec('PRAGMA journal_mode = WAL')
+    const actual = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+    if (actual !== 0 && actual !== DSH_WEB_SCHEMA_VERSION) {
+      throw new Error(`client-connection: web-auth database has schema version ${actual}; expected ${DSH_WEB_SCHEMA_VERSION}`)
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${DSH_WEB_PASSWORD_TABLE} (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      ) STRICT
+    `)
+    if (actual === 0) db.exec(`PRAGMA user_version = ${DSH_WEB_SCHEMA_VERSION}`)
+    return db
+  } catch (error: unknown) {
+    try { db.close() } catch { /* swallow */ }
+    throw error
+  }
+}
+
+/** Ensure exactly one password row exists. Creates from DSH_WEB_PASSWORD on
+ * first boot; when that variable is absent a random alphanumeric password is
+ * generated and printed to stderr because the deployment cannot accept any
+ * page without a password. */
+async function ensurePassword(db: DatabaseSync): Promise<{ generatedInitial: string | null }> {
+  const row = db.prepare(`SELECT hash FROM ${DSH_WEB_PASSWORD_TABLE} WHERE id = 1`).get() as
+    | { hash: string }
+    | undefined
+  if (row !== undefined) return { generatedInitial: null }
+  let password = process.env[DSH_WEB_PASSWORD]
+  let generated: string | null = null
+  if (password === undefined || password === '') {
+    // Never allow a zero-password installation: anyone reaching the URL would
+    // get full RCE on the server. Generate a strong random one and emit it.
+    password = encodeBase64Url(randomBytes(9)) // 12 chars, base64url
+    generated = password
+    console.error(
+      `client-connection: no ${DSH_WEB_PASSWORD} set; generated a one-time password: ${password}\n`
+      + `Set ${DSH_WEB_PASSWORD}=<value> in the service environment before restarting to avoid re-generation.`,
+    )
+  }
+  db.prepare(`
+    INSERT INTO ${DSH_WEB_PASSWORD_TABLE} (id, hash, created_at) VALUES (1, ?, ?)
+  `).run(hashPassword(password), Date.now())
+  return { generatedInitial: generated }
+}
+
 /**
  * Process launch-token exchange and persistent signed-cookie verification.
  * Connection loads the credential provider's signing secret during activation
  * and retains it for synchronous request authentication.
  */
 export class BrowserAuth {
-  private readonly launchToken: string
   private readonly maxAgeMilliseconds: number
+  private readonly loginDb: DatabaseSync
 
   private constructor(
-    processOwner: object,
     private readonly secret: Buffer,
     maxAgeDays: number,
+    loginDb: DatabaseSync,
   ) {
-    this.launchToken = processLaunchToken(processOwner)
     this.maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS
     if (!Number.isSafeInteger(this.maxAgeMilliseconds)
       || !Number.isSafeInteger(Date.now() + this.maxAgeMilliseconds)) {
       throw new Error('client-connection: cookieMaxAgeDays exceeds the safe timestamp range')
     }
+    this.loginDb = loginDb
   }
 
   /**
    * Initialize browser authentication and create its durable signing secret
-   * when this Harness home has none.
-   * @param processOwner - root application context retaining one token across Connection reloads.
-   * @param credentials - persistent credential provider for the Web profile.
-   * @param maxAgeDays - positive absolute browser-cookie lifetime in days.
-   * @returns initialized authentication owner with the process owner's launch token.
+   * when this Harness home has none. Opens the login database and guarantees
+   * exactly one password row exists, bootstrapping from env or a generated
+   * one-time value.
    */
   static async create(
-    processOwner: object,
+    _processOwner: object,
     credentials: CredentialProvider,
     maxAgeDays: number,
   ): Promise<BrowserAuth> {
-    return new BrowserAuth(processOwner, await initializeSecret(credentials), maxAgeDays)
+    const homePath = process.env['HOME']
+      ?? process.env['USERPROFILE']
+      ?? require('node:os').homedir?.()
+      ?? '.'
+    const pathModule = await import('node:path')
+    const dshHome = pathModule.join(homePath, '.dsh')
+    const loginDb = await openLoginDb(dshHome)
+    await ensurePassword(loginDb)
+    return new BrowserAuth(await initializeSecret(credentials), maxAgeDays, loginDb)
   }
 
-  /**
-   * Add this process's launch token to the ordinary application root URL.
-   * @param baseUrl - canonical browser origin without credentials.
-   * @returns root URL carrying the process token as its sole authentication input.
-   */
+  /** No-op for builds without a launch-token URL. */
   authenticatedUrl(baseUrl: string): string {
-    const url = new URL(baseUrl)
-    url.pathname = '/'
-    url.search = ''
-    url.hash = ''
-    url.searchParams.set(TOKEN_QUERY, this.launchToken)
-    return url.href
+    return baseUrl
   }
 
   /**
-   * Authenticate an index request. A valid root query token mints the cookie
-   * and redirects to clean `/`; a valid cookie lets the caller serve the
-   * index; every other request receives the same minimal 401 response.
-   * @param req - incoming root or configured-index request.
-   * @param res - response owned when this method returns false.
+   * Verify an incoming plaintext password against the stored row.
+   * @returns true when the password matches.
+   */
+  verifyPassword(password: string): boolean {
+    const row = this.loginDb.prepare(`SELECT hash FROM ${DSH_WEB_PASSWORD_TABLE} WHERE id = 1`)
+      .get() as { hash: string } | undefined
+    if (row === undefined) return false
+    return verifyPassword(password, row.hash)
+  }
+
+  /**
+   * Update the stored password. Requires the current password to match, or
+   * pass `true` as the third argument when the caller already holds
+   * authorization (admin reset path is not exposed remotely in this build).
+   * @returns true on success.
+   */
+  changePassword(currentPassword: string, newPassword: string, _bypassCurrent = false): boolean {
+    if (newPassword.length < 8) return false
+    if (!this.verifyPassword(currentPassword)) return false
+    this.loginDb.prepare(`UPDATE ${DSH_WEB_PASSWORD_TABLE} SET hash = ? WHERE id = 1`)
+      .run(hashPassword(newPassword))
+    return true
+  }
+
+  /** After login POST/GET, preserve the user's current deep path so a
+   * reverse-proxy mount like `/deepseek-harness/sessions/123` remains at the
+   * same route after cookie minting. */
+  private samePageStripLogin(req: ConnectionIndexRequest): string {
+    const url = new URL((req as IncomingMessage & { url?: string }).url ?? '/', 'http://dsh.invalid')
+    if (url.pathname.startsWith('/login')) url.pathname = '/'
+    url.searchParams.delete('password')
+    url.searchParams.delete('username')
+    return url.pathname + (url.search === '' ? '' : url.search)
+  }
+
+  /**
+   * Handle POST /login.json body `{password: string}`: on success mint cookie
+   * and return `{ok: true, redirect: string}`; otherwise `{ok: false}`.
+   */
+  async handleLoginJson(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = []
+    let total = 0
+    for await (const chunk of req as AsyncIterable<Buffer>) {
+      total += chunk.byteLength
+      if (total > 8 * 1024) { // 8 KiB cap: one password field never needs more.
+        res.writeHead(413)
+        res.end()
+        return
+      }
+      chunks.push(chunk)
+    }
+    let password: unknown
+    try {
+      password = (JSON.parse(Buffer.concat(chunks).toString('utf8')) as { password?: unknown }).password
+    } catch {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false }))
+      return
+    }
+    if (typeof password !== 'string') {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false }))
+      return
+    }
+    if (!this.verifyPassword(password)) {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false }))
+      return
+    }
+    // Use the same mint path: response writes Set-Cookie and reports the redirect target.
+    const authority = requestAuthority(req.headers)
+    if (authority === undefined) {
+      res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+      res.end(JSON.stringify({ ok: false }))
+      return
+    }
+    const issuedAt = Date.now()
+    const expiresAt = issuedAt + this.maxAgeMilliseconds
+    const value = encodeCookie({
+      version: COOKIE_PAYLOAD_VERSION,
+      authority,
+      issuedAt,
+      expiresAt,
+    }, this.secret)
+    res.writeHead(200, {
+      'cache-control': 'no-store',
+      'content-type': 'application/json; charset=utf-8',
+      'set-cookie': sessionCookie(
+        cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
+      ),
+    })
+    res.end(JSON.stringify({ ok: true, redirect: this.samePageStripLogin(req) }))
+  }
+
+  /**
+   * Authenticate an index request. A valid cookie serves the harness app;
+   * every unauthenticated GET/HEAD receives the login page so the password
+   * flow can run under any mounted path. POST /login.json is handled on the
+   * caller side via {@link handleLoginJson}.
+   *
    * @returns true only when the caller may serve index.html.
    */
   authorizeIndex(req: ConnectionIndexRequest, res: ConnectionIndexResponse): boolean {
-    /* v8 ignore next -- node:http always supplies url on server requests. */
-    const url = new URL(req.url ?? '/', 'http://dsh.invalid')
-    const tokens = url.searchParams.getAll(TOKEN_QUERY)
-    if (tokens.length > 0) {
-      const authority = requestAuthority(req.headers)
-      if (req.method === 'GET' && url.pathname === '/' && tokens.length === 1
-        && authority !== undefined && tokenMatches(tokens.join(''), this.launchToken)) {
-        const issuedAt = Date.now()
-        const expiresAt = issuedAt + this.maxAgeMilliseconds
-        const value = encodeCookie({
-          version: COOKIE_PAYLOAD_VERSION,
-          authority,
-          issuedAt,
-          expiresAt,
-        }, this.secret)
-        res.writeHead(303, {
-          'cache-control': 'no-store',
-          'location': '/',
-          'referrer-policy': 'no-referrer',
-          'set-cookie': sessionCookie(
-            cookieName(authority), value, expiresAt, Math.floor(this.maxAgeMilliseconds / 1000),
-          ),
-        })
-        res.end()
-        return false
-      }
-      if (req.method === 'GET' && url.pathname === '/' && this.isAuthenticated(req)) {
-        res.writeHead(303, {
-          'cache-control': 'no-store',
-          'location': '/',
-          'referrer-policy': 'no-referrer',
-        })
-        res.end()
-        return false
-      }
-      this.writeUnauthorized(req, res)
-      return false
-    }
     if (this.isAuthenticated(req)) return true
-    this.writeUnauthorized(req, res)
+    this.writeLoginPage(req, res)
     return false
   }
 
   /**
    * Verify the authority-bound browser cookie on a Host request.
-   * @param request - request headers carrying Host and Cookie.
    * @returns true only for an unexpired cookie signed by this activation's loaded secret.
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
@@ -301,13 +455,231 @@ export class BrowserAuth {
       && payload.expiresAt - payload.issuedAt <= this.maxAgeMilliseconds
   }
 
-  private writeUnauthorized(req: ConnectionIndexRequest, res: ConnectionIndexResponse): void {
-    res.writeHead(401, {
+  /**
+   * Return the login page HTML (deepseek.com/harness-inspired minimal
+   * design). The page mounts the password form, calls /login.json on submit,
+   * and then navigates to the returned redirect. Works identically whether
+   * the UI is served at / or behind a /deepseek-harness/ subpath (the login
+   * form uses relative fetch resolved through the current <base> fallback).
+   */
+  loginPageHtml(_req: ConnectionIndexRequest): string {
+    const year = new Date().getFullYear()
+    return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>登录 · Harness</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #111827;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
+    --border: #e5e7eb;
+    --card: #fafafa;
+    --error: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0b10;
+      --fg: #f3f4f6;
+      --muted: #9ca3af;
+      --accent: #818cf8;
+      --accent-hover: #a5b4fc;
+      --border: #1f2937;
+      --card: #12131a;
+      --error: #fca5a5;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+                 "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, sans-serif;
+    color: var(--fg);
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(79, 70, 229, 0.12), transparent 60%),
+      radial-gradient(900px 500px at 110% 10%, rgba(16, 185, 129, 0.10), transparent 60%),
+      var(--bg);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .shell {
+    width: 100%;
+    max-width: 460px;
+  }
+  .eyebrow {
+    color: var(--muted);
+    letter-spacing: .12em;
+    font-size: 12px;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-size: 30px;
+    line-height: 1.2;
+    margin: 0 0 12px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  .lead {
+    color: var(--muted);
+    line-height: 1.6;
+    margin: 0 0 28px;
+    font-size: 14px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--fg);
+  }
+  input[type="password"] {
+    width: 100%;
+    height: 44px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    padding: 0 14px;
+    font-size: 14px;
+    transition: border-color .15s, box-shadow .15s;
+    outline: none;
+  }
+  input[type="password"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  }
+  .row { display: flex; gap: 10px; margin-top: 14px; }
+  button {
+    flex: 1;
+    height: 44px;
+    border-radius: 10px;
+    border: none;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background .15s, transform .05s;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:active { transform: translateY(1px); }
+  button[disabled] { opacity: .6; cursor: progress; }
+  .status {
+    margin-top: 12px;
+    font-size: 13px;
+    min-height: 18px;
+    color: var(--error);
+  }
+  .footer {
+    margin-top: 20px;
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 22px;
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 999px; background: #10b981;
+    box-shadow: 0 0 0 4px rgba(16, 185, 129, .12);
+  }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="badge"><span class="dot"></span>Harness · 本地 Agent 工作空间</div>
+    <div class="eyebrow">Welcome</div>
+    <h1>登录进入你的 Harness</h1>
+    <p class="lead">一切都是插件。模型、工具、会话、沙箱、循环、调度全由插件构成，可替换、可组合、可追踪。</p>
+    <form class="card" id="f" autocomplete="off" spellcheck="false">
+      <label for="password">访问密码</label>
+      <input id="password" name="password" type="password" required autofocus placeholder="请输入部署时设置的密码" />
+      <div class="row"><button type="submit" id="btn">登 录</button></div>
+      <div class="status" id="status" aria-live="polite"></div>
+    </form>
+    <div class="footer">© ${String(year)} · Powered by DeepSeek Harness</div>
+  </div>
+<script>
+(function () {
+  var form = document.getElementById('f');
+  var btn = document.getElementById('btn');
+  var status = document.getElementById('status');
+  var input = document.getElementById('password');
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    btn.disabled = true;
+    status.textContent = '';
+    try {
+      var body = JSON.stringify({ password: input.value });
+      var res = await fetch('login.json', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body,
+      });
+      if (!res.ok) {
+        if (res.status === 401) throw new Error('密码错误，请重试。');
+        throw new Error('登录失败（状态码 ' + String(res.status) + '）。');
+      }
+      var data = await res.json();
+      if (!data || !data.ok) throw new Error('密码错误，请重试。');
+      var target = (data && data.redirect) ? data.redirect : './';
+      // Preserve the mount-point prefix: under /deepseek-harness/ the POST went
+      // to <current-dir>/login.json i.e. <prefix>/login.json, so the redirect
+      // starting with '/' would drop the prefix. Fix by staying relative: if
+      // the path is absolute and the page is served under a prefix longer than
+      // '/', rewrite to prefix + path.
+      var prefix = location.pathname.replace(/\/+$/, '');
+      if (prefix !== '' && target.charAt(0) === '/') {
+        target = prefix + (target === '/' ? '' : target);
+      } else if (target.charAt(0) !== '/') {
+        target = target;
+      }
+      window.location.assign(target || '.');
+    } catch (err) {
+      status.textContent = (err && err.message) ? err.message : '登录失败。';
+      btn.disabled = false;
+      input.focus();
+      input.select();
+    }
+  });
+})();
+</script>
+</body>
+</html>`
+  }
+
+  private writeLoginPage(req: ConnectionIndexRequest, res: ConnectionIndexResponse): void {
+    const body = this.loginPageHtml(req)
+    res.writeHead(req.method === 'GET' || req.method === undefined ? 200 : 401, {
       'cache-control': 'no-store',
-      'content-type': 'text/plain; charset=utf-8',
+      'content-type': 'text/html; charset=utf-8',
     })
-    res.end(req.method === 'HEAD'
-      ? undefined
-      : 'dsh web authentication required; reopen the URL printed by dsh web.\n')
+    res.end(body)
   }
 }
+
+/** Expose the default session age so callers (tests, startup) can align UI copy. */
+export const BROWSER_AUTH_DEFAULT_AGE_DAYS = SESSION_DAYS_DEFAULT
+/** @internal exposed for unit tests of the hashing round-trip. */
+export const internals = { hashPassword, verifyPassword }

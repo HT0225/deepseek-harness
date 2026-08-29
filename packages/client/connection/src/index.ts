@@ -63,6 +63,9 @@ function assertImageBodyCapacity(ctx: Context, maxRequestBodyBytes: number): voi
   }
 }
 
+/** Absolute Fetch-route path mounted in front of `/api` for the password form. */
+const LOGIN_JSON_PATH = '/login.json'
+
 /** Services required before providing Connection. */
 export const inject = ['webServer', 'credentials']
 
@@ -93,6 +96,14 @@ export const Config: z<ConnectionConfig> = z.object({
  * Mounts the API gateway under the browser transport prefix. Every request on
  * the prefix passes the Host/Origin browser-trust fence and persistent browser
  * authentication before dispatch.
+ *
+ * **Modified for password-login deployment:** mounts an exact `/login.json`
+ * POST route before the RPC `/api` prefix, serving the password-verification
+ * endpoint used by the login page returned by `authorizeIndex` on unauthed
+ * visits. Trusted-host checks are short-circuited by
+ * {@link isTrustedApiRequest} in this build, so any Host or origin that
+ * passes basic cookie-auth can use the RPC bridge.
+ *
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
@@ -105,13 +116,25 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   // silently authorizing its hostname prefix at request time.
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
   assertImageBodyCapacity(ctx, maxRequestBodyBytes)
-  const connection = new HostConnectionService(
-    ctx,
-    trustedHosts,
-    await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays),
-  )
+  const browserAuth = await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
+  const connection = new HostConnectionService(ctx, trustedHosts, browserAuth)
   const fetchHandler = connection.createSharedFetchHandler(API_PATH)
-  const route: WebRoute = {
+  // /login.json is an exact POST route outside the RPC fence: a successful
+  // verification returns the Set-Cookie header, then the page navigates to the
+  // redirect, which enters the normal index-auth gate below.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: LOGIN_JSON_PATH,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405)
+        res.end()
+        return
+      }
+      await browserAuth.handleLoginJson(req, res)
+    },
+  }), 'client-connection: /login.json route')
+  const apiRoute: WebRoute = {
     kind: 'prefix',
     path: API_PATH,
     handler: async (req, res) => {
@@ -124,7 +147,7 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
       await bridge(req, res, fetchHandler, maxRequestBodyBytes)
     },
   }
-  ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
+  ctx.effect(() => ctx.webServer.register(apiRoute), 'client-connection: /api route')
   ctx.inject(['attachments'], (attachmentCtx) => {
     assertImageBodyCapacity(attachmentCtx, maxRequestBodyBytes)
   })
