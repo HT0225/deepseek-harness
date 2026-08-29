@@ -311,9 +311,10 @@ export class BrowserAuth {
     credentials: CredentialProvider,
     maxAgeDays: number,
   ): Promise<BrowserAuth> {
+    const osModule = await import('node:os')
     const homePath = process.env['HOME']
       ?? process.env['USERPROFILE']
-      ?? require('node:os').homedir?.()
+      ?? osModule.homedir?.()
       ?? '.'
     const pathModule = await import('node:path')
     const dshHome = pathModule.join(homePath, '.dsh')
@@ -646,14 +647,21 @@ export class BrowserAuth {
       var target = (data && data.redirect) ? data.redirect : './';
       // Preserve the mount-point prefix: under /deepseek-harness/ the POST went
       // to <current-dir>/login.json i.e. <prefix>/login.json, so the redirect
-      // starting with '/' would drop the prefix. Fix by staying relative: if
-      // the path is absolute and the page is served under a prefix longer than
-      // '/', rewrite to prefix + path.
-      var prefix = location.pathname.replace(/\/+$/, '');
-      if (prefix !== '' && target.charAt(0) === '/') {
+      // starting with '/' would drop the prefix. Rewrite absolute targets to
+      // prefix + target (if prefix isn't just '/'); keep relative targets as-is.
+      // NOTE: avoid regex literals here — this snippet is embedded in a JS
+      // template literal. A literal 'backslash-slash' escape sequence inside
+      // the source template collapses to a single slash in the emitted HTML,
+      // so 'slash-slash ...' would become a JS line comment and leave the
+      // next 'if' dangling (SyntaxError: Unexpected token 'if').
+      var rawPrefix = location.pathname;
+      while (rawPrefix.length > 1 && rawPrefix.charAt(rawPrefix.length - 1) === '/') {
+        rawPrefix = rawPrefix.substring(0, rawPrefix.length - 1);
+      }
+      var prefix = rawPrefix !== '/' ? rawPrefix : '';
+      var targetIsAbsolute = target.length > 0 && target.charAt(0) === '/';
+      if (prefix !== '' && targetIsAbsolute) {
         target = prefix + (target === '/' ? '' : target);
-      } else if (target.charAt(0) !== '/') {
-        target = target;
       }
       window.location.assign(target || '.');
     } catch (err) {
