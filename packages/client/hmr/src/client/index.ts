@@ -163,7 +163,10 @@ export function apply(ctx: Context): void {
   }
 
   ctx.effect(() => {
-    const source = new EventSource(new URL(EVENTS_ENDPOINT, document.baseURI).href)
+    // Strip leading / from EVENTS_ENDPOINT so URL() preserves the <base href>
+    // sub-path; see rpc.ts resolveBase note for why a leading / drops it.
+    const relativeEvents = EVENTS_ENDPOINT.startsWith('/') ? EVENTS_ENDPOINT.slice(1) : EVENTS_ENDPOINT
+    const source = new EventSource(new URL(relativeEvents, document.baseURI).href)
     source.addEventListener('message', (event: MessageEvent<string>) => {
       let value: unknown
       try {

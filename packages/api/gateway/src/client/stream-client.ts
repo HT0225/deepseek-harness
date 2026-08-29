@@ -353,7 +353,10 @@ function remoteStreamUrl(): string {
       ? location.origin
       : INTERNAL_BASE
   )
-  const url = new URL(REMOTE_STREAM_MUX_PATH, base)
+  // Strip leading / from REMOTE_STREAM_MUX_PATH so URL() preserves the base
+  // sub-path (/deepseek-harness/); see rpc.ts resolveBase note.
+  const relativeMux = REMOTE_STREAM_MUX_PATH.startsWith('/') ? REMOTE_STREAM_MUX_PATH.slice(1) : REMOTE_STREAM_MUX_PATH
+  const url = new URL(relativeMux, base)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.href
 }

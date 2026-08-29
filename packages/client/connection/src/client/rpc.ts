@@ -40,8 +40,13 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
         method: endpoint,
         payload,
       }
+      // Use a relative channel path (strip leading /) so URL() preserves the
+      // <base href>'s sub-path (e.g. /deepseek-harness/) instead of replacing it
+      // entirely — URL('/api/x', 'http://host/deepseek-harness/') drops the
+      // base pathname and yields http://host/api/x, which is wrong.
+      const relativeChannel = channel.startsWith('/') ? channel.slice(1) : channel
       const response = await send(
-        new URL(`${channel}/${endpoint}`, resolveBase()),
+        new URL(`${relativeChannel}/${endpoint}`, resolveBase()),
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
