@@ -250,7 +250,21 @@ function artifactRevision(bundle: Buffer, sourceMap: WebPluginRecord['sourceMap'
   return framedHash('plugin-artifact', sourceMap === undefined ? [bundle] : [bundle, sourceMap.body])
 }
 
-/** Address one ordered plugin-file list through the shared combo route. */
+/**
+ * Canonical combo URL used as the stable Map key in responses and passed to
+ * serveBundle (matches the absolute path form Node `req.url` always uses).
+ */
+function canonicalComboUrl(ids: readonly string[], rev: string, sourceMap = false): string {
+  const resources = ids.map(id => `${id}/client.js${sourceMap ? '.map' : ''}`).join(',')
+  return `/plugins/??${resources}&rev=${rev}`
+}
+
+/**
+ * HTML-facing combo URL: rendered into `<link href>` and `<script src>`.
+ * The relative `./plugins` form lets the browser apply the current
+ * `<base href>` so subpath mounts such as `/deepseek-harness` resolve
+ * correctly to `/deepseek-harness/plugins/??...`.
+ */
 function comboUrl(ids: readonly string[], rev: string, sourceMap = false): string {
   const resources = ids.map(id => `${id}/client.js${sourceMap ? '.map' : ''}`).join(',')
   return `./plugins/??${resources}&rev=${rev}`
@@ -401,7 +415,18 @@ function buildCombo(records: readonly WebPluginRecord[], revision?: string): Com
   const entries = records.map(record => record.entry.id)
   const url = comboUrl(entries, rev)
   const sourceMapUrl = comboUrl(entries, rev, true)
-  return { url, rev, entries, script: comboScript(source, sourceMapUrl), sourceMap, sourceMapUrl }
+  const canonicalUrl = canonicalComboUrl(entries, rev)
+  const canonicalSourceMapUrl = canonicalComboUrl(entries, rev, true)
+  return {
+    url,
+    rev,
+    entries,
+    script: comboScript(source, sourceMapUrl),
+    sourceMap,
+    sourceMapUrl,
+    canonicalUrl,
+    canonicalSourceMapUrl,
+  }
 }
 
 /** Add initial-load scheduling metadata to a combo artifact. */
@@ -695,11 +720,11 @@ export class ClientModuleRegistry extends Service {
 
     const batchResponses = new Map<string, { body: Buffer; contentType: string }>()
     for (const artifact of artifacts) {
-      batchResponses.set(artifact.descriptor.url, {
+      batchResponses.set(artifact.canonicalUrl, {
         body: artifact.script,
         contentType: 'text/javascript; charset=utf-8',
       })
-      batchResponses.set(artifact.sourceMapUrl, {
+      batchResponses.set(artifact.canonicalSourceMapUrl, {
         body: artifact.sourceMap,
         contentType: 'application/json; charset=utf-8',
       })
@@ -707,11 +732,11 @@ export class ClientModuleRegistry extends Service {
     const responses = new Map(batchResponses)
     for (const record of this.table.values()) {
       const artifact = buildCombo([record], record.entry.rev)
-      responses.set(artifact.url, {
+      responses.set(artifact.canonicalUrl, {
         body: artifact.script,
         contentType: 'text/javascript; charset=utf-8',
       })
-      responses.set(artifact.sourceMapUrl, {
+      responses.set(artifact.canonicalSourceMapUrl, {
         body: artifact.sourceMap,
         contentType: 'application/json; charset=utf-8',
       })
