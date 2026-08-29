@@ -165,12 +165,14 @@ interface ComboArtifactBase {
   rev: string
   entries: string[]
   script: Buffer
+  canonicalUrl: string
 }
 
 /** One generated combo response over an ordered list of plugin resources. */
 interface ComboArtifact extends ComboArtifactBase {
   sourceMap: Buffer
   sourceMapUrl: string
+  canonicalSourceMapUrl: string
 }
 
 /** One generated initial-load response and its wire descriptor. */
