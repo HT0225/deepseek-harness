@@ -253,7 +253,7 @@ function artifactRevision(bundle: Buffer, sourceMap: WebPluginRecord['sourceMap'
 /** Address one ordered plugin-file list through the shared combo route. */
 function comboUrl(ids: readonly string[], rev: string, sourceMap = false): string {
   const resources = ids.map(id => `${id}/client.js${sourceMap ? '.map' : ''}`).join(',')
-  return `/plugins/??${resources}&rev=${rev}`
+  return `./plugins/??${resources}&rev=${rev}`
 }
 
 /** Measure the longer map-form URL used to partition a startup resource list. */
@@ -305,8 +305,8 @@ function comboSource(record: WebPluginRecord): ComboSource {
   source = source.replace(SOURCE_URL_TRAILER, '').replace(SOURCE_MAP_TRAILER, '')
   if (!source.endsWith('\n')) source += '\n'
   const fallbackSource = sourceUrl === undefined
-    ? `/plugins/${record.entry.id}/client.js`
-    : /^(?:[A-Za-z][A-Za-z\d+.-]*:|\/)/.test(sourceUrl) ? sourceUrl : `/${sourceUrl}`
+    ? `./plugins/${record.entry.id}/client.js`
+    : /^(?:[A-Za-z][A-Za-z\d+.-]*:|\/)/.test(sourceUrl) ? sourceUrl : `./${sourceUrl}`
   return { source, fallbackSource }
 }
 

@@ -163,7 +163,7 @@ export function apply(ctx: Context): void {
   }
 
   ctx.effect(() => {
-    const source = new EventSource(EVENTS_ENDPOINT)
+    const source = new EventSource(new URL(EVENTS_ENDPOINT, document.baseURI).href)
     source.addEventListener('message', (event: MessageEvent<string>) => {
       let value: unknown
       try {
