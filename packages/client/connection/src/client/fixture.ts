@@ -1791,6 +1791,7 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         value: {
           writable: true,
           hasDocument: true,
+          canOpenDocument: true,
           namespaces: [{
             ns: 'llm-deepseek',
             schema: {},

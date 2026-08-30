@@ -20,7 +20,7 @@ function view(ns: string, revision = 0): SettingsNamespaceView {
 }
 
 function described(namespaces: SettingsNamespaceView[]): Answer<SettingsDescribeView> {
-  return ok({ writable: true, hasDocument: true, namespaces })
+  return ok({ writable: true, hasDocument: true, canOpenDocument: true, namespaces })
 }
 
 function deferred<T>() {

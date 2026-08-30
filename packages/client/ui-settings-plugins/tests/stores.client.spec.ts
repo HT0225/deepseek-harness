@@ -1103,7 +1103,7 @@ describe('ConfigurablePluginsTabController', () => {
     let notify = (): void => {}
     let snapshot: SettingsMirrorSnapshot = {
       status: 'ready' as const,
-      view: { writable: true, hasDocument: true, namespaces: [] },
+      view: { writable: true, hasDocument: true, canOpenDocument: true, namespaces: [] },
       error: null,
     }
     const describeFace = {
@@ -1125,6 +1125,7 @@ describe('ConfigurablePluginsTabController', () => {
       view: {
         writable: true,
         hasDocument: true,
+        canOpenDocument: true,
         namespaces: [{
           ns: 'bash', schema: {}, value: {}, applies: 'live', secrets: [], revision: 1,
         }],
