@@ -8,6 +8,7 @@ import {
 const SID = 'session-export-controller' as SessionId
 
 afterEach(() => {
+  Reflect.deleteProperty(document, 'baseURI')
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
@@ -34,6 +35,23 @@ describe('SessionLogDownloadController', () => {
     expect(controller.store.getSnapshot().bySession[SID]).toEqual({
       open: true, status: 'success', error: null,
     })
+  })
+
+  it('resolves the export URL under a reverse-proxy sub-path mount', async () => {
+    Object.defineProperty(document, 'baseURI', {
+      value: 'https://host.example/deepseek-harness/', configurable: true,
+    })
+    const fetcher = vi.fn(async () => new Response('zip', { status: 200 }))
+    const controller = new SessionLogDownloadController(fetcher, vi.fn())
+
+    await controller.download(SID)
+
+    const [url] = fetcher.mock.calls[0] as unknown as [URL, RequestInit]
+    expect(url.pathname).toBe('/deepseek-harness/api/session.export')
+    expect(url.href).toBe(
+      'https://host.example/deepseek-harness/api/session.export?sessionId=session-export-controller&includeDescendants=true',
+    )
+    expect(controller.store.getSnapshot().bySession[SID]?.status).toBe('success')
   })
 
   it('collapses concurrent gestures and preserves a dismissed dialog', async () => {
@@ -100,6 +118,7 @@ describe('SessionLogDownloadController', () => {
   })
 
   it('uses the null-origin fallback and default browser operations', async () => {
+    Object.defineProperty(document, 'baseURI', { value: '', configurable: true })
     vi.stubGlobal('location', { origin: 'null' })
     const fetcher = vi.fn(async (_input: string | URL, _init?: RequestInit) => new Response('zip'))
     vi.stubGlobal('fetch', fetcher)

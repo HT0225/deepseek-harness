@@ -7,8 +7,8 @@ import {
 } from '../rpc.ts'
 import type { ClientConnectionRpc, ConnectionRpcResult } from '../rpc.ts'
 import { randomUuid } from './random-uuid.ts'
+import { resolveHostBase } from './host-base.ts'
 
-const INTERNAL_BASE = 'http://dsh.internal'
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
 
@@ -40,13 +40,10 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
         method: endpoint,
         payload,
       }
-      // Use a relative channel path (strip leading /) so URL() preserves the
-      // <base href>'s sub-path (e.g. /deepseek-harness/) instead of replacing it
-      // entirely — URL('/api/x', 'http://host/deepseek-harness/') drops the
-      // base pathname and yields http://host/api/x, which is wrong.
+      // Strip the leading / so the join keeps the base pathname (see resolveHostBase).
       const relativeChannel = channel.startsWith('/') ? channel.slice(1) : channel
       const response = await send(
-        new URL(`${relativeChannel}/${endpoint}`, resolveBase()),
+        new URL(`${relativeChannel}/${endpoint}`, resolveHostBase()),
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -108,17 +105,6 @@ function parseConnectionResponse(value: unknown): {
 
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function resolveBase(): string {
-  // Use document.baseURI (anchored by the <base href="..."> tag the Host
-  // injects into index.html) so RPC requests correctly resolve behind a
-  // reverse-proxy sub-path mount such as /deepseek-harness/. A worker or
-  // offline harness falls back to the page origin, then the sentinel value.
-  const doc = (globalThis as { document?: { baseURI?: string } }).document
-  if (doc?.baseURI !== undefined && doc.baseURI !== '') return doc.baseURI
-  const location = (globalThis as { location?: { origin?: string } }).location
-  return location?.origin !== undefined && location.origin !== 'null' ? location.origin : INTERNAL_BASE
 }
 
 function assertTarget(channel: string, endpoint: string): void {

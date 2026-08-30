@@ -166,6 +166,7 @@
       "@deepseek-ai/dsh-client-ui-session/client": ["./packages/client/ui-session/src/client"],
       "@deepseek-ai/dsh-client-ui-session/invariant": ["./packages/client/ui-session/src/invariant.ts"],
       "@deepseek-ai/dsh-client-connection": ["./packages/client/connection/src"],
+      "@deepseek-ai/dsh-client-connection/client/host-base": ["./packages/client/connection/src/client/host-base.ts"],
       "@deepseek-ai/dsh-api-remotes": ["./packages/api/remotes/src"],
       "@deepseek-ai/dsh-api-remotes/client": ["./packages/api/remotes/src/client/index.ts"],
       "@deepseek-ai/dsh-client-hmr": ["./packages/client/hmr/src"],

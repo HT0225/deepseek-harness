@@ -7,8 +7,8 @@ import {
   type RemoteStreamServerMessage,
 } from '../stream-protocol.ts'
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
+import { resolveHostBase } from '@deepseek-ai/dsh-client-connection/client/host-base'
 
-const INTERNAL_BASE = 'http://dsh.internal'
 const RECONNECT_BASE_MS = 500
 const RECONNECT_FACTOR = 2
 const RECONNECT_MAX_MS = 10_000
@@ -340,23 +340,11 @@ class StreamInbox {
 }
 
 function remoteStreamUrl(): string {
-  // Resolve the multiplexed WebSocket URL against the Host-injected
-  // `<base href="...">` when available (document.baseURI) so a reverse-proxy
-  // sub-path mount like `/deepseek-harness` becomes part of the path. The
-  // server route still strips the prefix before the upgrade handler, but the
-  // originating client needs the full public path to reach the proxy mount.
-  const doc = (globalThis as { document?: { baseURI?: string } }).document
-  const fromBase = doc?.baseURI !== undefined && doc.baseURI !== '' ? doc.baseURI : undefined
-  const location = (globalThis as { location?: { origin?: string } }).location
-  const base = fromBase ?? (
-    location?.origin !== undefined && location.origin !== 'null'
-      ? location.origin
-      : INTERNAL_BASE
-  )
-  // Strip leading / from REMOTE_STREAM_MUX_PATH so URL() preserves the base
-  // sub-path (/deepseek-harness/); see rpc.ts resolveBase note.
+  // The server route strips the proxy prefix before the upgrade handler, but
+  // the originating client needs the full public path to reach the proxy mount.
+  // Strip the leading / so the join keeps the base pathname (see resolveHostBase).
   const relativeMux = REMOTE_STREAM_MUX_PATH.startsWith('/') ? REMOTE_STREAM_MUX_PATH.slice(1) : REMOTE_STREAM_MUX_PATH
-  const url = new URL(relativeMux, base)
+  const url = new URL(relativeMux, resolveHostBase())
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.href
 }
