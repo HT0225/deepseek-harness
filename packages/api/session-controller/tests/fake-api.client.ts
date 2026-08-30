@@ -21,6 +21,7 @@ import type {
 } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { WorkspaceRemote } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { WorkspaceFollowFrame } from '@deepseek-ai/dsh-api-workspace-controller/types'
+import type { WorkspaceArchivedSession } from '@deepseek-ai/dsh-api-workspace-controller/types'
 import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import {
   RemoteStream,
@@ -199,6 +200,15 @@ export class FakeApiClient {
   onWorkspaceArchiveSession: (payload: unknown) => Promise<RemoteResult<{ archivedSessionIds: SessionId[] }>> =
     payload => Promise.resolve(remoteOk({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
 
+  onWorkspaceListArchivedSessions: () => Promise<RemoteResult<{ items: WorkspaceArchivedSession[] }>> =
+    () => Promise.resolve(remoteOk({ items: [] }))
+
+  onWorkspaceUnarchiveSession: (payload: unknown) => Promise<RemoteResult<{ archivedSessionIds: SessionId[] }>> =
+    payload => Promise.resolve(remoteOk({ archivedSessionIds: [(payload as { sessionId: SessionId }).sessionId] }))
+
+  onWorkspaceDeleteArchivedSession: (payload: unknown) => Promise<RemoteResult<{ deleted: true; archivedSessionIds: SessionId[] }>> =
+    () => Promise.resolve(remoteOk({ deleted: true, archivedSessionIds: [] }))
+
   /** Remote namespaces bound to this fake's programmable unary slots and stream pumps. */
   sessionRemotes(): RuntimeRemotes {
     return {
@@ -276,6 +286,21 @@ export class FakeApiClient {
           'workspace.archiveSession',
           payload,
           this.onWorkspaceArchiveSession(payload),
+        ),
+        listArchivedSessions: () => this.record(
+          'workspace.listArchivedSessions',
+          undefined,
+          this.onWorkspaceListArchivedSessions(),
+        ),
+        unarchiveSession: payload => this.record(
+          'workspace.unarchiveSession',
+          payload,
+          this.onWorkspaceUnarchiveSession(payload),
+        ),
+        deleteArchivedSession: payload => this.record(
+          'workspace.deleteArchivedSession',
+          payload,
+          this.onWorkspaceDeleteArchivedSession(payload),
         ),
         follow: signal => this.openWorkspace(signal),
       },

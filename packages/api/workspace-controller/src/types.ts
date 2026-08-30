@@ -41,6 +41,8 @@ export interface WorkspaceErrorDetailsMap {
     readonly beforeSessionId?: SessionId
   }
   'session-not-found': { readonly sessionId: SessionId }
+  'session-not-archived': { readonly sessionId: SessionId }
+  internal: { readonly sessionId?: SessionId; readonly workspaceId?: WorkspaceId }
 }
 
 /** Workspace business failure returned without throwing a carrier error. */
@@ -68,6 +70,45 @@ export interface DirectoryPickerErrorDetailsMap {
   cancelled: Record<never, never>
   /** A backend failure with no seam code of its own. */
   internal: Record<never, never>
+}
+
+/** Session requested to be restored from the global archive set. */
+export interface WorkspaceUnarchiveSessionRequest {
+  readonly sessionId: SessionId
+}
+
+/** Complete archived session set after an unarchive mutation. */
+export interface WorkspaceUnarchiveValue {
+  readonly archivedSessionIds: readonly SessionId[]
+}
+
+/** Archived session requested for permanent physical erasure. */
+export interface WorkspaceDeleteArchivedRequest {
+  readonly sessionId: SessionId
+}
+
+/** Deletion receipt after an archived session is permanently dropped. */
+export interface WorkspaceDeleteArchivedValue {
+  readonly deleted: true
+  readonly archivedSessionIds: readonly SessionId[]
+}
+
+/** One archived session row returned by the list RPC. */
+export interface WorkspaceArchivedSession {
+  readonly sessionId: SessionId
+  /** Epoch ms. Derived max(createdAt, latest user-message time). */
+  readonly updatedAt: number
+  /** Normalized display title. `null` means the UI should show a timestamp placeholder. */
+  readonly title: string | null
+  /** Owning workspace id, or `null` when no workspace accounts the session. */
+  readonly workspaceId: WorkspaceId | null
+  /** Owning workspace title, or `null` when ownership is unknown. */
+  readonly workspaceTitle: string | null
+}
+
+/** Response envelope for the archived-session listing query. */
+export interface WorkspaceListArchivedValue {
+  readonly items: readonly WorkspaceArchivedSession[]
 }
 
 /** Existing directory requested for Workspace adoption. */

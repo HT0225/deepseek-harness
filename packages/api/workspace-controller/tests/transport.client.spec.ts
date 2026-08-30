@@ -22,13 +22,18 @@ import type {
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
+  WorkspaceDeleteArchivedRequest,
+  WorkspaceDeleteArchivedValue,
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
+  WorkspaceListArchivedValue,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUnarchiveSessionRequest,
+  WorkspaceUnarchiveValue,
   WorkspaceError,
   WorkspaceId,
   WorkspaceValue,
@@ -140,6 +145,18 @@ class ScriptedWorkspaceRemote implements WorkspaceRemote {
     throw new Error('unused')
   }
 
+  listArchivedSessions(): Promise<RemoteResult<WorkspaceListArchivedValue>> {
+    throw new Error('unused')
+  }
+
+  unarchiveSession(_request: WorkspaceUnarchiveSessionRequest): Promise<RemoteResult<WorkspaceUnarchiveValue>> {
+    throw new Error('unused')
+  }
+
+  deleteArchivedSession(_request: WorkspaceDeleteArchivedRequest): Promise<RemoteResult<WorkspaceDeleteArchivedValue>> {
+    throw new Error('unused')
+  }
+
   async *follow(signal = new AbortController().signal): AsyncIterable<WorkspaceFollowFrame> {
     const generation = this.generations[this.calls++]
     if (generation === undefined) throw new Error('no scripted Workspace generation')
@@ -178,6 +195,19 @@ class CommandWorkspaceRemote implements WorkspaceRemote {
 
   readonly archiveSession = vi.fn<WorkspaceRemote['archiveSession']>(request => Promise.resolve(remoteOk({
     archivedSessionIds: [request.sessionId],
+  })))
+
+  readonly listArchivedSessions = vi.fn<WorkspaceRemote['listArchivedSessions']>(() => Promise.resolve(remoteOk({
+    items: [],
+  })))
+
+  readonly unarchiveSession = vi.fn<WorkspaceRemote['unarchiveSession']>(() => Promise.resolve(remoteOk({
+    archivedSessionIds: [],
+  })))
+
+  readonly deleteArchivedSession = vi.fn<WorkspaceRemote['deleteArchivedSession']>(() => Promise.resolve(remoteOk({
+    deleted: true,
+    archivedSessionIds: [],
   })))
 
   async *follow(_signal?: AbortSignal): AsyncIterable<WorkspaceFollowFrame> {}

@@ -13,14 +13,20 @@ import { workspaceView } from './feed.ts'
 import type {
   WorkspaceArchiveSessionRequest,
   WorkspaceArchiveValue,
+  WorkspaceArchivedSession,
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
+  WorkspaceDeleteArchivedRequest,
+  WorkspaceDeleteArchivedValue,
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
+  WorkspaceListArchivedValue,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUnarchiveSessionRequest,
+  WorkspaceUnarchiveValue,
   WorkspaceValue,
 } from './types.ts'
 
@@ -160,6 +166,73 @@ export class WorkspaceCommands {
       throw failure('session-not-found', error.message, { sessionId: request.sessionId })
     }
     return { archivedSessionIds: [...this.ctx.workspaceRegistry.archivedSessionIds] }
+  }
+
+  /**
+   * Restore one known Session from the registry-global archive set.
+   * Idempotent when the session is already visible.
+   * @param request - Session identity to unarchive.
+   * @returns the complete resulting archive set.
+   */
+  async unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<WorkspaceUnarchiveValue> {
+    try {
+      await this.ctx.workspaceRegistry.unarchiveSession(request.sessionId)
+    } catch (error) {
+      if (!(error instanceof WorkspaceUnknownSessionError)) throw error
+      throw failure('session-not-found', error.message, { sessionId: request.sessionId })
+    }
+    return { archivedSessionIds: [...this.ctx.workspaceRegistry.archivedSessionIds] }
+  }
+
+  /**
+   * Permanently erase one archived Session: clear the archive marker, detach
+   * it from any Workspace's candidate account, and ask sessionPersistence
+   * to destroy the durable log. The session MUST currently be archived or
+   * the verb refuses — live visible sessions cannot be silently dropped.
+   * @param request - archived Session identity to erase.
+   * @returns deletion receipt plus the remaining archive set.
+   */
+  async deleteArchivedSession(
+    request: WorkspaceDeleteArchivedRequest,
+  ): Promise<WorkspaceDeleteArchivedValue> {
+    try {
+      await this.ctx.workspaceRegistry.dropArchivedSession(request.sessionId)
+    } catch (error) {
+      if (error instanceof WorkspaceUnknownSessionError) {
+        throw failure(
+          'session-not-archived',
+          error.message,
+          { sessionId: request.sessionId },
+        )
+      }
+      if (error instanceof TypertRemoteFailure) throw error
+      throw failure(
+        'internal',
+        `cannot delete archived session "${request.sessionId}": ${errorMessage(error)}`,
+        { sessionId: request.sessionId },
+      )
+    }
+    return {
+      deleted: true,
+      archivedSessionIds: [...this.ctx.workspaceRegistry.archivedSessionIds],
+    }
+  }
+
+  /**
+   * List every archived Session with UI-ready row metadata. Rows are sorted
+   * by most recent activity first.
+   * @returns ordered archived session summaries.
+   */
+  async listArchivedSessions(): Promise<WorkspaceListArchivedValue> {
+    const rows = await this.ctx.workspaceRegistry.listArchivedSessions()
+    const items: WorkspaceArchivedSession[] = rows.map(row => ({
+      sessionId: row.sessionId,
+      updatedAt: row.updatedAt,
+      title: row.title,
+      workspaceId: row.workspaceId,
+      workspaceTitle: row.workspaceTitle,
+    }))
+    return { items }
   }
 
   private requireWorkspace(workspaceId: WorkspaceId): Workspace {

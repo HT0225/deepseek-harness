@@ -274,6 +274,26 @@ export class SqliteStore implements PersistenceBackend<number> {
     }))
   }
 
+  /**
+   * Physically erase a session row and its cascaded events. Missing sessions
+   * report as absent (no fault) so archival bookkeeping stays aligned against
+   * concurrent external deletions.
+   * @param id - session id to erase.
+   * @returns `true` when a row was deleted, `false` when it was missing.
+   */
+  async destroy(id: SessionId): Promise<boolean> {
+    await this.open()
+    this.db.exec(sql('begin-immediate'))
+    try {
+      validateSchemaForMutation(this.databaseConstructor, this.db, this.databasePath)
+      const result = this.db.prepare(sql('delete-session')).run(id)
+      this.db.exec(sql('commit'))
+      return Number(result.changes) > 0
+    } catch (error: unknown) {
+      this.rollback(error, 'destroy session')
+    }
+  }
+
   async close(): Promise<void> {
     if (this.ready === undefined) {
       if (this.pathReady !== undefined) await Promise.allSettled([this.pathReady])

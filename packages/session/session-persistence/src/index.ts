@@ -280,6 +280,25 @@ export abstract class SessionPersistence extends Service {
    * @returns one header and opaque revision per materialized session without loading full logs.
    */
   abstract listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]>
+
+  /**
+   * Irrecoverably erase one session's persisted metadata and event log.
+   * Backends that own a single store (for example SQLite) physically remove
+   * the matching rows; per-session artifact backends delete the file. The
+   * abstract default refuses: deployment packages must pick a backend that
+   * overrides this method. Implementations MUST return `false` when the
+   * session was already absent rather than treat the miss as a fault, so
+   * accounting callers can keep archival and workspace bookkeeping in sync
+   * against eventual-consistency windows.
+   * @param id - persisted session to erase.
+   * @returns `true` when a physical record was erased, `false` when absent.
+   */
+  destroy(id: SessionId): Promise<boolean> {
+    void id
+    return Promise.reject(
+      new Error('this session persistence backend does not implement permanent session erasure'),
+    )
+  }
 }
 
 export default SessionPersistence

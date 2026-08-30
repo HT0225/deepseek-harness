@@ -26,6 +26,20 @@ export { workspaceDomainState, workspaceRecord, workspaceDomainSpec } from './sp
 export type { WorkspaceDomainState, WorkspaceRecord } from './spec.ts'
 export { realpathNormalize } from './paths.ts'
 
+/** A row returned by the archived-session listing projection. */
+export interface ArchivedSessionRow {
+  /** Archived session identity. */
+  readonly sessionId: SessionId
+  /** Derived updated-at timestamp: max(header.createdAt, latest user/message time). */
+  readonly updatedAt: number
+  /** Normalized session title, or null when no projection has produced one yet. */
+  readonly title: string | null
+  /** Owning workspace id, or null when no workspace matches the session's canonical cwd. */
+  readonly workspaceId: WorkspaceId | null
+  /** Owning workspace display title, or null when the owning workspace is unknown. */
+  readonly workspaceTitle: string | null
+}
+
 /** Identifies one workspace record (see `src/types.ts` for the brand rationale). */
 export type WorkspaceId = WorkspaceIdBrand
 
@@ -235,6 +249,37 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Return lightweight descriptions for every archived session. The rows are
+   * ordered by most recent header activity first (newest last-activity at the
+   * top). Title and workspace are best-effort — missing projections or
+   * unknown workspace membership report as null so the UI can fall back to a
+   * timestamp-driven placeholder instead of dropping the row.
+   * @returns array of archived session summaries.
+   */
+  async listArchivedSessions(): Promise<readonly ArchivedSessionRow[]> {
+    const rows: ArchivedSessionRow[] = []
+    const archived = this.requireState().archivedSessionIds
+    for (const sessionId of archived) {
+      const header = this.headers.get(sessionId)
+        ?? await this.safeRefreshHeader(sessionId)
+      if (header === undefined) continue
+      const workspace = this.workspaceForSession(sessionId)
+      const title = this.readCachedTitle(sessionId)
+      const lastPromptAt = this.readCachedLastPrompt(sessionId)
+      const updatedAt = Math.max(header.createdAt, lastPromptAt ?? 0)
+      rows.push({
+        sessionId,
+        updatedAt,
+        title,
+        workspaceId: workspace?.id ?? null,
+        workspaceTitle: workspace?.title ?? null,
+      })
+    }
+    rows.sort((left, right) => right.updatedAt - left.updatedAt)
+    return rows
+  }
+
+  /**
    * Archive one session durably. The session must exist (live or in session
    * persistence); its workspace accounting — or lack of one — is irrelevant.
    * An already archived id resolves without writing.
@@ -255,6 +300,65 @@ export class WorkspaceRegistry extends Service {
   }
 
   /**
+   * Remove one session from the registry-global archive set durably. The
+   * session does not need to be currently archived: absent ids are an
+   * idempotent no-op. Workspace accounting is unchanged: unarchiving only
+   * clears the hidden marker so grouping surfaces re-show the session in its
+   * original accounted slot.
+   * @param sessionId - The session to restore from archive.
+   * @returns resolution after durability.
+   */
+  unarchiveSession(sessionId: SessionId): Promise<void> {
+    return this.enqueueOperation(async () => {
+      const state = this.requireState()
+      if (!state.archivedSessionIds.includes(sessionId)) return
+      await this.setState({
+        ...state,
+        archivedSessionIds: state.archivedSessionIds.filter(id => id !== sessionId),
+      })
+    })
+  }
+
+  /**
+   * Permanent, cross-reference erasure for one archived session: removes it
+   * from the archive set, detaches it from any workspace candidate account,
+   * and asks `sessionPersistence` to erase the physical durable log. The
+   * session MUST currently be archived before calling — a non-archived id
+   * rejects, because the live UI surface would otherwise silently lose a
+   * visible session. Callers that want to drop non-archived sessions must
+   * explicitly archive them first.
+   * @param sessionId - The archived session to permanently drop.
+   * @returns whether any durable state changed (always true for a valid drop).
+   */
+  dropArchivedSession(sessionId: SessionId): Promise<boolean> {
+    return this.enqueueOperation(async () => {
+      const state = this.requireState()
+      if (!state.archivedSessionIds.includes(sessionId)) {
+        throw new WorkspaceUnknownSessionError(sessionId)
+      }
+      const workspace = this.workspaceForSession(sessionId)
+      if (workspace !== undefined) await workspace.detachSession(sessionId)
+      const archivalPruned = {
+        ...this.requireState(),
+        archivedSessionIds: this.requireState()
+          .archivedSessionIds.filter(id => id !== sessionId),
+      }
+      await this.setState(archivalPruned)
+      try {
+        await this.ctx.sessionPersistence.destroy(sessionId)
+      } catch (error) {
+        this.ctx.logger.warn(
+          `workspaceRegistry: sessionPersistence.destroy("${sessionId}") failed after archival and workspace bookkeeping were cleared; proceeding with the logical drop: ${String(error)}`,
+        )
+      }
+      this.headers.delete(sessionId)
+      this.sessionPaths.delete(sessionId)
+      this.invalidSessionPaths.delete(sessionId)
+      return true
+    })
+  }
+
+  /**
    * Whether a session is live, header-indexed, or present in a fresh
    * persistence listing. Only a definite miss returns false — a failing
    * `sessionPersistence.list()` propagates so storage faults never
@@ -265,6 +369,77 @@ export class WorkspaceRegistry extends Service {
     if (this.headers.has(id)) return true
     await this.indexHeaders(await this.ctx.sessionPersistence.list())
     return this.headers.has(id)
+  }
+
+  /**
+   * Resolve which Workspace, if any, accounts a given session id. Uses the
+   * canonical in-memory index first (accounted slot) and falls back to
+   * matching the session's canonical cwd against workspace paths when the
+   * session has no accounted membership yet.
+   * @param sessionId - session id to locate.
+   * @returns the owning Workspace, or `undefined` when no workspace accounts it.
+   */
+  private workspaceForSession(sessionId: SessionId): Workspace | undefined {
+    for (const entity of this.entities.values()) {
+      if (entity.sessionIds.includes(sessionId)) return entity
+    }
+    const cwd = this.sessionPaths.get(sessionId)
+    if (cwd === undefined) return undefined
+    for (const entity of this.entities.values()) {
+      if (entity.path === cwd) return entity
+    }
+    return undefined
+  }
+
+  /**
+   * Re-read sessionPersistence headers once and return the header for id if
+   * present. Swallows listing failures by returning undefined rather than
+   * propagating — the listing already runs at startup so a mid-flight fault is
+   * rare and we want the archive list to be best-effort.
+   */
+  private async safeRefreshHeader(id: SessionId): Promise<SessionHeader | undefined> {
+    try {
+      await this.indexHeaders(await this.ctx.sessionPersistence.list())
+    } catch {
+      return undefined
+    }
+    return this.headers.get(id)
+  }
+
+  /**
+   * Best-effort read of the normalized session title from the projection
+   * cache. Returns null when the cache is unmounted or has not captured the
+   * latest title yet — UI callers should fall back to a timestamp placeholder.
+   */
+  private readCachedTitle(id: SessionId): string | null {
+    const projection = this.ctx.get('sessionProjectionCache')
+    if (projection === undefined) return null
+    try {
+      const snap = projection.cachedSnapshot({ id })
+      const titleValue = (snap.values as { title?: { title: string | null } }).title
+      return titleValue?.title ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Best-effort read of the latest user-message timestamp from the cached
+   * session-list metadata projection. Used to derive updatedAt for archived
+   * rows; returns null when the projection cache has no row yet.
+   */
+  private readCachedLastPrompt(id: SessionId): number | null {
+    const projection = this.ctx.get('sessionProjectionCache')
+    if (projection === undefined) return null
+    try {
+      const snap = projection.cachedSnapshot({ id })
+      const meta = (snap.values as {
+        sessionListMetadata?: { blank: boolean; lastPromptAt: number | null }
+      }).sessionListMetadata
+      return meta?.lastPromptAt ?? null
+    } catch {
+      return null
+    }
   }
 
   /**

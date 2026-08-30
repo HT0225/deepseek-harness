@@ -10,13 +10,18 @@ import type {
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
+  WorkspaceDeleteArchivedRequest,
+  WorkspaceDeleteArchivedValue,
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
+  WorkspaceListArchivedValue,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
+  WorkspaceUnarchiveSessionRequest,
+  WorkspaceUnarchiveValue,
   WorkspaceValue,
 } from './types.ts'
 
@@ -107,6 +112,39 @@ export class WorkspaceController extends TypertRemoteService {
   @Remote('archiveSession')
   archiveSession(request: WorkspaceArchiveSessionRequest): Promise<WorkspaceArchiveValue> {
     return this.commands.archiveSession(request)
+  }
+
+  /**
+   * Restore one hidden Session from the global archive set, making it
+   * visible again in its original Workspace accounting slot.
+   * @param request - Session identity to unarchive.
+   * @returns the resulting archive set.
+   */
+  @Remote('unarchiveSession')
+  unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<WorkspaceUnarchiveValue> {
+    return this.commands.unarchiveSession(request)
+  }
+
+  /**
+   * Permanently erase one archived Session. The session must currently be
+   * archived; visible live sessions refuse this verb.
+   * @param request - archived Session identity to erase.
+   * @returns deletion receipt plus the remaining archive set.
+   */
+  @Remote('deleteArchivedSession')
+  deleteArchivedSession(
+    request: WorkspaceDeleteArchivedRequest,
+  ): Promise<WorkspaceDeleteArchivedValue> {
+    return this.commands.deleteArchivedSession(request)
+  }
+
+  /**
+   * List all archived Sessions ordered by most recent activity first.
+   * @returns UI-ready archive rows including title and workspace metadata.
+   */
+  @Remote('listArchivedSessions')
+  listArchivedSessions(): Promise<WorkspaceListArchivedValue> {
+    return this.commands.listArchivedSessions()
   }
 
   /**

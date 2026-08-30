@@ -7,16 +7,21 @@ import type {
   WorkspaceArchiveValue,
   WorkspaceCreateRequest,
   WorkspaceCreateValue,
+  WorkspaceDeleteArchivedRequest,
+  WorkspaceDeleteArchivedValue,
   WorkspaceDeleteRequest,
   WorkspaceDeleteValue,
   WorkspaceFollowFrame,
   WorkspaceInsertBeforeRequest,
   WorkspaceInsertSessionBeforeRequest,
+  WorkspaceListArchivedValue,
   WorkspaceOrderValue,
   WorkspaceRenameRequest,
-  WorkspaceValue,
+  WorkspaceUnarchiveSessionRequest,
+  WorkspaceUnarchiveValue,
   WorkspaceError,
   WorkspaceId,
+  WorkspaceValue,
   WorkspaceView,
 } from '../src/types.ts'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
@@ -114,6 +119,21 @@ class FakeWorkspaceRemote implements WorkspaceRemote {
   archiveSession(request: WorkspaceArchiveSessionRequest): Promise<RemoteResult<WorkspaceArchiveValue>> {
     this.record('archiveSession', request)
     return this.onArchiveSession(request)
+  }
+
+  listArchivedSessions(): Promise<RemoteResult<WorkspaceListArchivedValue>> {
+    this.record('listArchivedSessions', {})
+    return Promise.resolve(remoteOk({ items: [] }))
+  }
+
+  unarchiveSession(request: WorkspaceUnarchiveSessionRequest): Promise<RemoteResult<WorkspaceUnarchiveValue>> {
+    this.record('unarchiveSession', request)
+    return Promise.resolve(remoteOk({ archivedSessionIds: [] }))
+  }
+
+  deleteArchivedSession(request: WorkspaceDeleteArchivedRequest): Promise<RemoteResult<WorkspaceDeleteArchivedValue>> {
+    this.record('deleteArchivedSession', request)
+    return Promise.resolve(remoteOk({ deleted: true, archivedSessionIds: [] }))
   }
 
   async *follow(_signal?: AbortSignal): AsyncGenerator<WorkspaceFollowFrame> {}
