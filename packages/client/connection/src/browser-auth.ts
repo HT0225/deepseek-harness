@@ -252,30 +252,20 @@ async function openLoginDb(homePath: string): Promise<DatabaseSync> {
 }
 
 /** Ensure exactly one password row exists. Creates from DSH_WEB_PASSWORD on
- * first boot; when that variable is absent a random alphanumeric password is
- * generated and printed to stderr because the deployment cannot accept any
- * page without a password. */
+ * first boot. When that variable is absent the deployment runs with browser
+ * authentication disabled (local development mode): no row is written and
+ * {@link BrowserAuth.isAuthenticated} passes every request. */
 async function ensurePassword(db: DatabaseSync): Promise<{ generatedInitial: string | null }> {
+  const envPassword = process.env[DSH_WEB_PASSWORD]
+  if (envPassword === undefined || envPassword === '') return { generatedInitial: null }
   const row = db.prepare(`SELECT hash FROM ${DSH_WEB_PASSWORD_TABLE} WHERE id = 1`).get() as
     | { hash: string }
     | undefined
   if (row !== undefined) return { generatedInitial: null }
-  let password = process.env[DSH_WEB_PASSWORD]
-  let generated: string | null = null
-  if (password === undefined || password === '') {
-    // Never allow a zero-password installation: anyone reaching the URL would
-    // get full RCE on the server. Generate a strong random one and emit it.
-    password = encodeBase64Url(randomBytes(9)) // 12 chars, base64url
-    generated = password
-    console.error(
-      `client-connection: no ${DSH_WEB_PASSWORD} set; generated a one-time password: ${password}\n`
-      + `Set ${DSH_WEB_PASSWORD}=<value> in the service environment before restarting to avoid re-generation.`,
-    )
-  }
   db.prepare(`
     INSERT INTO ${DSH_WEB_PASSWORD_TABLE} (id, hash, created_at) VALUES (1, ?, ?)
-  `).run(hashPassword(password), Date.now())
-  return { generatedInitial: generated }
+  `).run(hashPassword(envPassword), Date.now())
+  return { generatedInitial: null }
 }
 
 /**
@@ -286,11 +276,14 @@ async function ensurePassword(db: DatabaseSync): Promise<{ generatedInitial: str
 export class BrowserAuth {
   private readonly maxAgeMilliseconds: number
   private readonly loginDb: DatabaseSync
+  /** Set when DSH_WEB_PASSWORD is absent: every request passes without login. */
+  private readonly authDisabled: boolean
 
   private constructor(
     private readonly secret: Buffer,
     maxAgeDays: number,
     loginDb: DatabaseSync,
+    authDisabled: boolean,
   ) {
     this.maxAgeMilliseconds = maxAgeDays * DAY_MILLISECONDS
     if (!Number.isSafeInteger(this.maxAgeMilliseconds)
@@ -298,6 +291,7 @@ export class BrowserAuth {
       throw new Error('client-connection: cookieMaxAgeDays exceeds the safe timestamp range')
     }
     this.loginDb = loginDb
+    this.authDisabled = authDisabled
   }
 
   /**
@@ -320,7 +314,9 @@ export class BrowserAuth {
     const dshHome = pathModule.join(homePath, '.dsh')
     const loginDb = await openLoginDb(dshHome)
     await ensurePassword(loginDb)
-    return new BrowserAuth(await initializeSecret(credentials), maxAgeDays, loginDb)
+    const authDisabled = process.env[DSH_WEB_PASSWORD] === undefined
+      || process.env[DSH_WEB_PASSWORD] === ''
+    return new BrowserAuth(await initializeSecret(credentials), maxAgeDays, loginDb, authDisabled)
   }
 
   /** No-op for builds without a launch-token URL. */
@@ -442,6 +438,7 @@ export class BrowserAuth {
    * @returns true only for an unexpired cookie signed by this activation's loaded secret.
    */
   isAuthenticated(request: ConnectionTrustRequest): boolean {
+    if (this.authDisabled) return true
     const authority = requestAuthority(request.headers)
     const rawCookie = header(request.headers, 'cookie')
     if (authority === undefined || rawCookie === undefined) return false
