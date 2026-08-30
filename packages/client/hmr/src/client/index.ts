@@ -92,10 +92,12 @@ function removeOwnedStyles(id: string): void {
 
 /**
  * Mount the HMR driver: subscribe to the system SSE channel and hot-swap
- * rebuilt entries.
+ * rebuilt entries. Dev-only: production has no rebuild pipeline so skip the
+ * EventSource connection (avoids a spurious console error on every page load).
  * @param ctx - plugin context with `loader` and `modules` available.
  */
 export function apply(ctx: Context): void {
+  if (process.env.NODE_ENV === 'production') return
   // Both are declared injections (typed Context merges: `modules` from the
   // client module loader package, `loader` from the vendored Loader).
   const modLoader = ctx.modules

@@ -62,10 +62,12 @@ function sameBundleStat(left: WatchedBundleStat, right: WatchedBundleStat): bool
 
 /**
  * Mount the dev chain: bundle watches, rebuilt reporting, and the SSE channel.
+ * Dev-only: production builds skip entirely (no poll overhead, no SSE route).
  * @param ctx - host plugin context carrying clientModuleHost and webServer.
  * @param config - validated {@link Config}.
  */
 export function apply(ctx: Context, config: Config): void {
+  if (process.env.NODE_ENV === 'production') return
   // schemastery's .default() guarantees the field is set after validation.
   const pollIntervalMs = config.pollIntervalMs as number
 
