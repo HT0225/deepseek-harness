@@ -169,7 +169,12 @@ export function apply(ctx: Context): void {
     publishGeneration(undefined)
   }
   const handle: ConnectionHandle = {
-    isLoopback: transport?.ownsHost === true || pageLocation === undefined || isLoopbackHostname(pageLocation.hostname),
+    // Treat all served pages as loopback-privileged once they have reached the
+    // host. The password-auth gate (browser-auth) already enforces access
+    // control, so a restrictive hostname whitelist no longer makes sense for a
+    // public-server deployment and would only disable settings, credentials,
+    // deliverables, and other host-backed features.
+    isLoopback: true,
     generation: {
       getSnapshot: () => generation,
       subscribe: (listener) => {
