@@ -68,6 +68,13 @@ export interface SettingsDescribeValue {
   writable: boolean
   /** Whether a file-backed provider owns a local document, without exposing its Host path. */
   hasDocument: boolean
+  /**
+   * Whether the host environment can hand `hasDocument` to a native text
+   * editor. Headless Linux containers, for example, own a document but
+   * have no desktop launcher to open it; UIs should hide the open gesture
+   * rather than surface a guaranteed failure when this is false.
+   */
+  canOpenDocument: boolean
   /** One view per registered namespace. */
   namespaces: SettingsNamespaceView[]
 }

@@ -36,6 +36,11 @@ export interface SettingsDescribeView {
   writable: boolean
   /** Whether a native settings document exists for the Host to open. */
   hasDocument: boolean
+  /**
+   * Whether the host can actually hand the document to a native text editor.
+   * False on headless Linux containers even when `hasDocument` is true.
+   */
+  canOpenDocument: boolean
 }
 
 /** Mirror state every derived settings surface renders from. */

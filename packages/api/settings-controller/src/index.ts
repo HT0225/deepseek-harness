@@ -124,6 +124,7 @@ export class SettingsController extends TypertRemoteService {
     return {
       writable: settings.writable,
       hasDocument: settings.documentPath !== undefined,
+      canOpenDocument: this.canOpenPath(),
       namespaces: settings.describe({ redactSecrets: true }).map(namespaceView),
     }
   }
@@ -211,6 +212,7 @@ export class SettingsController extends TypertRemoteService {
       throw internal('settings provider has no local document to open')
     }
     if (isAborted(signal)) throw cancelled('settings document open was aborted')
+    if (!this.canOpenPath()) return { opened: false, path }
     try {
       await this.openTextFile(path, signal)
       return { opened: true }

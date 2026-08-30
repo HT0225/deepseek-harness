@@ -91,9 +91,12 @@ export class SettingsDocumentStore {
       }
       return
     }
-    const { hasDocument } = mirrored.view
+    const { hasDocument, canOpenDocument } = mirrored.view
+    // Headless hosts own a document but have no desktop launcher to open it;
+    // treat the gesture as unavailable instead of showing an erroring button.
+    const ready = Boolean(hasDocument) && Boolean(canOpenDocument)
     this.store.update((state) => {
-      state.status = hasDocument ? 'ready' : 'unavailable'
+      state.status = ready ? 'ready' : 'unavailable'
       state.error = null
     })
   }

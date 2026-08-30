@@ -30,10 +30,15 @@ export type SettingsError = {
   }
 }[keyof SettingsErrorDetailsMap]
 
-/** Confirmation that the settings document was handed to the native editor. */
-export interface SettingsDocumentOpenValue {
-  readonly opened: true
-}
+/**
+ * Result of opening the provider-owned settings document via the host's
+ * native text editor. Headless or containerised hosts cannot hand the
+ * document to a desktop application; they answer opened=false alongside
+ * the document path so UIs can fall back to revealing instead of erroring.
+ */
+export type SettingsDocumentOpenValue =
+  | { readonly opened: true }
+  | { readonly opened: false; readonly path: string }
 
 /** Result of opening or revealing one locally authored Agent preset directory. */
 export type AgentPresetDirectoryOpenValue =
