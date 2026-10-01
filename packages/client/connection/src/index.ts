@@ -1,5 +1,6 @@
 /** Host HTTP bridge for browser-client RPC. */
 import type { Context } from '@deepseek-ai/cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-credentials'
@@ -10,18 +11,23 @@ import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority } from './api-request-trust.ts'
 import { BrowserAuth } from './browser-auth.ts'
 import { HostConnectionService } from './rpc-host.ts'
+import { ConnectionRecoveryConfigSchema, resolveConnectionConfig, type ConnectionRecoveryConfig } from './recovery-config.ts'
 
 export type {
+  PeerAdmission,
   ConnectionFetchMethod,
   ConnectionFetchHandler,
   ConnectionFetchRoute,
   ConnectionIndexRequest,
   ConnectionIndexResponse,
   ConnectionRpcEndpointMatcher,
+  ConnectionRpcAttachment,
   ConnectionRpcFailure,
   ConnectionRpcHandler,
+  ConnectionRpcHandlerResult,
   ConnectionRequestRejection,
   ConnectionRpcResult,
+  ConnectionRequestBodyMode,
   ConnectionTrustRequest,
   ClientRequest,
   HostConnectionHandle,
@@ -30,7 +36,9 @@ export type {
   RpcMessage,
   ServerResponse,
 } from './rpc.ts'
+export type { PeerId, PeerScope, RemoteInvocation } from '@deepseek-ai/dsh-typert-protocol'
 export { RpcId, transportError } from './rpc.ts'
+export { OperatorPeer } from './operator-peer.ts'
 export {
   clientRequestSchema,
   rpcErrorSchema,
@@ -45,6 +53,20 @@ export { API_PATH } from './api-path.ts'
 
 /** Stable Cordis plugin name. */
 export const name = 'client-connection'
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Admit or wrap an authenticated shared API request, including body transfer.
+     * Existing requests continue when a listener refuses subsequent requests.
+     * @param request - Authenticated incoming HTTP request.
+     * @param response - Response owned until the delegated bridge settles.
+     * @param next - Delegate to the next listener or the shared API bridge.
+     * @mode waterfall
+     */
+    'connection/request'(request: IncomingMessage, response: ServerResponse, next: () => Promise<void>): Promise<void>
+  }
+}
 
 /** Headroom for RPC JSON fields around aggregate base64 image payloads. */
 const REQUEST_ENVELOPE_HEADROOM_BYTES = 1024 * 1024
@@ -67,10 +89,12 @@ function assertImageBodyCapacity(ctx: Context, maxRequestBodyBytes: number): voi
 const LOGIN_JSON_PATH = '/login.json'
 
 /** Services required before providing Connection. */
-export const inject = ['webServer', 'credentials']
+export const inject = ['credentials']
 
-/** Plugin config: the deployment's non-loopback serving authorities. */
+/** Browser authentication, request limits, and connection recovery configuration. */
 export interface ConnectionConfig {
+  /** Browser recovery timing, injected into each served page. */
+  recovery?: ConnectionRecoveryConfig
   /**
    * Authorities this deployment serves beyond loopback: exact `host:port`, or
    * port-less `host` matching any port. The /api trust fence refuses any
@@ -87,27 +111,27 @@ export interface ConnectionConfig {
 }
 
 export const Config: z<ConnectionConfig> = z.object({
+  recovery: ConnectionRecoveryConfigSchema.default({}),
   trustedHosts: z.array(String).default([]),
   cookieMaxAgeDays: z.natural().min(1).default(30),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
 })
 
 /**
- * Mounts the API gateway under the browser transport prefix. Every request on
- * the prefix passes the Host/Origin browser-trust fence and persistent browser
- * authentication before dispatch.
+ * Provides carrier-neutral RPC and Fetch registries. When `webServer` is
+ * present, the plugin also mounts the `/api` browser transport with Host/Origin
+ * checks and persistent browser authentication.
  *
  * **Modified for password-login deployment:** mounts an exact `/login.json`
  * POST route before the RPC `/api` prefix, serving the password-verification
  * endpoint used by the login page returned by `authorizeIndex` on unauthed
- * visits. Trusted-host checks are short-circuited by
- * {@link isTrustedApiRequest} in this build, so any Host or origin that
- * passes basic cookie-auth can use the RPC bridge.
+ * visits.
  *
  * @param ctx - Host plugin context.
  * @param config - resolved plugin config (schema defaults applied).
  */
 export async function apply(ctx: Context, config?: ConnectionConfig): Promise<void> {
+  const recovery = resolveConnectionConfig(config?.recovery)
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
   const cookieMaxAgeDays = config?.cookieMaxAgeDays ?? 30
@@ -118,36 +142,42 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
   assertImageBodyCapacity(ctx, maxRequestBodyBytes)
   const browserAuth = await BrowserAuth.create(ctx.root, ctx.credentials, cookieMaxAgeDays)
   const connection = new HostConnectionService(ctx, trustedHosts, browserAuth)
-  const fetchHandler = connection.createSharedFetchHandler(API_PATH)
-  // /login.json is an exact POST route outside the RPC fence: a successful
-  // verification returns the Set-Cookie header, then the page navigates to the
-  // redirect, which enters the normal index-auth gate below.
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: LOGIN_JSON_PATH,
-    handler: async (req, res) => {
-      if (req.method !== 'POST') {
-        res.writeHead(405)
-        res.end()
-        return
-      }
-      await browserAuth.handleLoginJson(req, res)
-    },
-  }), 'client-connection: /login.json route')
-  const apiRoute: WebRoute = {
-    kind: 'prefix',
-    path: API_PATH,
-    handler: async (req, res) => {
-      const rejection = connection.requestRejection(req)
-      if (rejection !== undefined) {
-        res.writeHead(rejection)
-        res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
-        return
-      }
-      await bridge(req, res, fetchHandler, maxRequestBodyBytes)
-    },
-  }
-  ctx.effect(() => ctx.webServer.register(apiRoute), 'client-connection: /api route')
+  ctx.inject(['webServer'], (webCtx) => {
+    assertImageBodyCapacity(webCtx, maxRequestBodyBytes)
+    webCtx.on('webserver/index-inject', (table) => {
+      table.push({ kind: 'global', name: '__DSH_CONNECTION_RECOVERY__', value: recovery })
+    })
+    // /login.json is an exact POST route outside the RPC fence: a successful
+    // verification returns the Set-Cookie header, then the page navigates to the
+    // redirect, which enters the normal index-auth gate below.
+    webCtx.effect(() => webCtx.webServer.register({
+      kind: 'exact',
+      path: LOGIN_JSON_PATH,
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405)
+          res.end()
+          return
+        }
+        await browserAuth.handleLoginJson(req, res)
+      },
+    }), 'client-connection: /login.json route')
+    const fetchHandler = connection.createSharedFetchHandler(API_PATH)
+    const route: WebRoute = {
+      kind: 'prefix',
+      path: API_PATH,
+      handler: async (req, res) => {
+        const admission = connection.admit(req)
+        if ('rejection' in admission) {
+          res.writeHead(admission.rejection)
+          res.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
+          return
+        }
+        await webCtx.waterfall('connection/request', req, res, () => bridge(req, res, fetchHandler, maxRequestBodyBytes))
+      },
+    }
+    webCtx.effect(() => webCtx.webServer.register(route), 'client-connection: /api route')
+  })
   ctx.inject(['attachments'], (attachmentCtx) => {
     assertImageBodyCapacity(attachmentCtx, maxRequestBodyBytes)
   })
