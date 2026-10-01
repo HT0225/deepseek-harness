@@ -67,9 +67,31 @@ export function isSameOrigin(a: URL, b: URL): boolean {
 }
 
 /**
+ * `application/*` types that carry human-readable text — structured config,
+ * source code, and data interchange — and decode as `text`. Fetching these
+ * bodies reads them as content only; running one is the shell capability's
+ * approved execution, not this provider's concern.
+ */
+const TEXT_APPLICATION_TYPES: ReadonlySet<string> = new Set([
+  'application/json',
+  'application/xml',
+  'application/javascript',
+  'application/x-javascript',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-python',
+  'application/yaml',
+  'application/x-yaml',
+  'application/toml',
+  'application/sql',
+  'application/csv',
+])
+
+/**
  * Classify a response `Content-Type` into a decodable body kind, or `undefined`
  * for an unsupported (e.g. binary) type. `text/html` and `application/xhtml+xml`
- * are `html`; other `text/*` plus a few structured text types are `text`.
+ * are `html`; other `text/*`, the text types in {@link TEXT_APPLICATION_TYPES},
+ * and `+json`/`+xml` suffixed types are `text`.
  *
  * @param contentType - the raw `Content-Type` header, or `null` when the
  *   response carries none (unsupported).
@@ -79,7 +101,7 @@ export function classifyContentType(contentType: string | null): FetchableKind |
   const mime = (contentType ?? '').replace(/;.*$/s, '').trim().toLowerCase()
   if (mime === 'text/html' || mime === 'application/xhtml+xml') return 'html'
   if (mime.startsWith('text/')) return 'text'
-  if (mime === 'application/json' || mime === 'application/xml' || mime.endsWith('+json') || mime.endsWith('+xml')) return 'text'
+  if (TEXT_APPLICATION_TYPES.has(mime) || mime.endsWith('+json') || mime.endsWith('+xml')) return 'text'
   return undefined
 }
 
