@@ -268,6 +268,11 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
     minWidth: 520,
     minHeight: 600,
     show,
+    ...(process.platform === 'win32' ? {
+      icon: app.isPackaged
+        ? join(process.resourcesPath, 'icon.png')
+        : join(app.getAppPath(), 'resources', 'icon-windows.png'),
+    } : {}),
     ...(process.platform === 'win32' && primary ? {
       backgroundColor: chromeFallbackFill(),
       titleBarStyle: 'hidden' as const,
