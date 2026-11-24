@@ -31,7 +31,8 @@ function setup(locale = 'en') {
   let current = resolveDesktopLocale(locale)
   const open = vi.fn()
   const quit = vi.fn()
-  const tray = new DesktopTray({ iconPath: 'C:/app/resources/tray.ico', locale: () => current, open, quit })
+  const tray = new DesktopTray({ iconPath: 'C:/app/resources/tray.ico', locale: () => current, open, quit,
+    menuItems: () => [{ label: 'Network Proxy', submenu: [] }] })
   return { tray, open, quit, native: native.trays[0]!, setLocale: (next: string) => { current = resolveDesktopLocale(next) } }
 }
 
@@ -44,7 +45,8 @@ it('shows the application icon with its name as the tooltip and an Open / Quit m
   expect(native.createFromPath).toHaveBeenCalledWith('C:/app/resources/tray.ico')
   expect(f.native.image).toEqual({ path: 'C:/app/resources/tray.ico' })
   expect(f.native.setToolTip).toHaveBeenCalledWith('DeepSeek Harness')
-  expect(labels(native.menus[0]!)).toEqual(['Open DeepSeek Harness', 'separator', 'Quit DeepSeek Harness'])
+  expect(labels(native.menus[0]!)).toEqual(['Open DeepSeek Harness', 'separator', 'Network Proxy',
+    'separator', 'Quit DeepSeek Harness'])
   expect(f.native.setContextMenu).toHaveBeenCalledWith({ template: native.menus[0] })
 })
 
@@ -54,7 +56,7 @@ it('opens the window on a single click and routes menu entries to the open and q
   expect(f.open).toHaveBeenCalledOnce()
   const menu = native.menus[0]!
   ;(menu[0] as { click: () => void }).click()
-  ;(menu[2] as { click: () => void }).click()
+  ;(menu[4] as { click: () => void }).click()
   expect(f.open).toHaveBeenCalledTimes(2)
   expect(f.quit).toHaveBeenCalledOnce()
 })
@@ -63,7 +65,8 @@ it('relabels the menu in the current locale and ignores relabel after disposal',
   const f = setup()
   f.setLocale('zh')
   f.tray.relabel()
-  expect(labels(native.menus[1]!)).toEqual(['打开 DeepSeek Harness', 'separator', '退出 DeepSeek Harness'])
+  expect(labels(native.menus[1]!)).toEqual(['打开 DeepSeek Harness', 'separator', 'Network Proxy',
+    'separator', '退出 DeepSeek Harness'])
   f.tray.dispose()
   f.tray.dispose()
   expect(f.native.destroy).toHaveBeenCalledOnce()

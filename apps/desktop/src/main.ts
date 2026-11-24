@@ -27,6 +27,13 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron'
 import { resolveDesktopPaths } from './paths.ts'
+import {
+  DesktopNetworkSettingsFile,
+  networkEnvironment,
+  resolveEffectiveNetwork,
+  type DesktopNetworkSettings,
+  type EffectiveNetwork,
+} from './network-settings.ts'
 import { DesktopProjectManager } from './project-manager.ts'
 import { DesktopHostFatalError, DesktopHostProcess, DesktopHostUncleanExitError } from './host-process.ts'
 import { DesktopPlatformView, PLATFORM_IPC, platformBounds } from './platform-view.ts'
@@ -385,6 +392,9 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
 
 async function main(): Promise<void> {
   const desktopSettings = await readDesktopSettings(app.getPath('userData'))
+  // A launcher-provided mode wins for this launch; the stored preference is the default otherwise.
+  const networkSettingsFile = new DesktopNetworkSettingsFile(app.getPath('userData'))
+  let networkSettings = await networkSettingsFile.load()
   void pruneCrashReports(app.getPath('logs'))
   const journalDirectory = process.env.DSH_DESKTOP_UPDATE_JOURNAL_DIR
   const updateJournal = journalDirectory === undefined ? undefined : new DesktopUpdateJournal(journalDirectory, app.getVersion())
@@ -407,7 +417,16 @@ async function main(): Promise<void> {
     return result.environment
   })
   let hostEnvironment: NodeJS.ProcessEnv = process.env
-  const prepareHostEnvironment = async (): Promise<void> => { hostEnvironment = await loginShell }
+  /** The mode the currently starting Host will inherit; `auto` is resolved here, before the spawn. */
+  let effectiveNetwork: EffectiveNetwork = { kind: 'direct' }
+  const prepareHostEnvironment = async (): Promise<void> => {
+    hostEnvironment = await loginShell
+    effectiveNetwork = await resolveEffectiveNetwork(networkSettings, url => session.defaultSession.resolveProxy(url))
+    // One line per Host start: the preference and the concrete mode it produced. No credential
+    // appears here; a local proxy URL is not a secret.
+    console.log('desktop network: preference=' + networkSettings.mode + ' applied=' + effectiveNetwork.kind
+      + (effectiveNetwork.kind === 'proxy' ? ' proxy=' + effectiveNetwork.url : ''))
+  }
   let quitting = false
   let startup: Promise<void> | undefined
   let workspaceRecovery: Promise<void> | undefined
@@ -539,7 +558,7 @@ async function main(): Promise<void> {
   const backend = new DesktopBackendController((onFailure) => {
     const hostInspectPort = developmentHostInspectPort(development)
     const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject,
-      hostInspectPort, { ...hostEnvironment, DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
+      hostInspectPort, { ...networkEnvironment(hostEnvironment, effectiveNetwork), DSH_CLIENT_VERSION: desktopClientVersion() }, onFailure,
       primaryRuntime,
       resources, (next) => { platformView.setSession(next) }, (record) => {
         operationJournal ??= new OperationJournal(join(app.getPath('userData'), 'plugin-operations'), {
@@ -1216,6 +1235,7 @@ async function main(): Promise<void> {
     { label: currentDesktopLocale().messages.checkUpdatesMenu, click: () => { void openUpdatePrompt(true) } },
     ...process.platform === 'darwin' || process.platform === 'win32'
       ? [{ label: currentDesktopLocale().messages.cliCommandMenu, click: () => { void commandManager.show() } }] : [],
+    ...networkMenuItems(),
     { type: 'separator' },
     ...development ? [
       { label: currentDesktopLocale().messages.reloadPageMenu, role: 'reload' as const },
@@ -1236,6 +1256,63 @@ async function main(): Promise<void> {
     { role: 'toggleDevTools', visible: false },
     devToolsF12Shortcut,
   ]
+  let networkSwitch: Promise<void> | undefined
+  /**
+   * Apply a new network mode at runtime: persist it, then restart only the Host so the window and
+   * shell stay open. The Host is the process that owns outbound HTTP, so its environment must be
+   * rebuilt rather than patched in place.
+   */
+  const switchNetwork = (mode: DesktopNetworkSettings['mode']): void => {
+    if (quitting || networkSwitch !== undefined) return
+    networkSettings = { ...networkSettings, mode }
+    void networkSettingsFile.save(networkSettings).catch((error: unknown) => {
+      console.error('desktop network: settings write failed', error)
+    })
+    refreshApplicationMenu()
+    networkSwitch = (async () => {
+      await backend.stop()
+      if (isQuitting()) return
+      const hostReady = backend.start(prepareHostEnvironment)
+      startup = hostReady
+      const recovery = hostReady.then(async () => {
+        if (quitting) return
+        // A replacement Host can have a new port, cookie, or boot injections even at the same URL.
+        navigation = undefined
+        await navigateMain(applicationUrl)
+        if (backend.host !== undefined) updateJournal?.action('workspace-ready')
+      })
+      workspaceRecovery = recovery
+      void recovery.catch((error: unknown) => { reportFatal(error, 'main') }).finally(() => {
+        if (startup === hostReady) startup = undefined
+        if (workspaceRecovery === recovery) workspaceRecovery = undefined
+      })
+      try { await recovery } catch (error) { console.error('desktop network: switch failed', error) }
+    })().catch((error: unknown) => {
+      console.error('desktop network: switch failed', error)
+      void dialog.showMessageBox({ type: 'error', title: currentDesktopLocale().messages.networkMenu,
+        message: currentDesktopLocale().messages.networkSwitchFailed }).catch(() => undefined)
+    }).finally(() => { networkSwitch = undefined })
+  }
+  /** Tray and application-menu entries; radio items reflect the preference in force. */
+  const networkMenuItems = (): MenuItemConstructorOptions[] => {
+    const messages = currentDesktopLocale().messages
+    const mode = networkSettings.mode
+    return [{
+      label: messages.networkMenu,
+      submenu: [
+        { label: messages.networkAuto, type: 'radio', checked: mode === 'auto', click: () => { switchNetwork('auto') } },
+        { label: `${messages.networkProxy} (${networkSettings.proxyUrl})`, type: 'radio', checked: mode === 'proxy', click: () => { switchNetwork('proxy') } },
+        { label: messages.networkDirect, type: 'radio', checked: mode === 'direct', click: () => { switchNetwork('direct') } },
+        { type: 'separator' },
+        { label: messages.networkOpenSettings, click: () => {
+          void networkSettingsFile.save(networkSettings).then(
+            () => shell.openPath(networkSettingsFile.path()),
+            (error: unknown) => { console.error('desktop network: settings write failed', error) },
+          )
+        } },
+      ],
+    }]
+  }
   const refreshApplicationMenu = (): void => {
     Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'win32'
       ? windowsDevToolsShortcuts : [{
@@ -1250,7 +1327,7 @@ async function main(): Promise<void> {
     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
     try {
       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
-        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() } })
+        open: () => { focusPrimaryWindow() }, quit: () => { app.quit() }, menuItems: networkMenuItems })
     } catch (error) { console.warn('desktop tray: unavailable', error) }
   }
   const backgroundNotice = process.platform === 'win32'
